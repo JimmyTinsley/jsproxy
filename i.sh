@@ -17,7 +17,6 @@ INSTALL_DIR=/home/jsproxy
 NGX_DIR=$INSTALL_DIR/openresty
 
 DOMAIN_SUFFIX=(
-  xip.io
   nip.io
   sslip.io
 )
@@ -77,7 +76,7 @@ gen_cert() {
   fi
 
   log "安装 acme.sh 脚本 ..."
-  curl https://raw.githubusercontent.com/Neilpang/acme.sh/master/acme.sh | INSTALLONLINE=1  sh
+  curl  https://get.acme.sh | sh
 
   local acme=~/.acme.sh/acme.sh
 
