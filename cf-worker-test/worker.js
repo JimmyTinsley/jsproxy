@@ -15,7 +15,8 @@
  */
 
 var TEST_TAG = 'jsproxy-yt-test'
-var TEST_VER = '122'
+var TEST_VER = '123'
+var REQMAP_HEADER = 'x-jsproxy-reqmap'
 var JS_VER = 10
 var BUNDLE_NAME = 'bundle.c33e24c5.js'
 var UPSTREAM_STATIC = 'https://etherdream.github.io/jsproxy'
@@ -126,7 +127,7 @@ function patchAuthorBundle(text) {
  * 缓冲流 body，失败返回 502 而不是抛给 bundle 变成 200 load fail。
  */
 /* <FETCH_WRAP_IIFE_BEGIN> */
-var FETCH_WRAP_IIFE = "// <JSPROXY_YT_TEST_FETCH_WRAP>\n(function(){\n/**\n * SW 侧 fetch 包装：在作者 bundle.c33e24c5.js 调用 fetch(proxyUrl, init)\n * 之前把 ReadableStream body 缓冲成 ArrayBuffer，并写回同一个 init，\n * 以便 network.launch() 的重试循环能复用正文。\n *\n * 这是针对 Chrome 105+ 的构造期异常：\n *   TypeError: Failed to execute 'fetch' on 'WorkerGlobalScope':\n *   The 'duplex' member must be specified for a request with a streaming body\n *\n * 评估结论：只加 duplex half 能过构造检查，但对 /http/ 代理路径仍会\n * 因流式上传 CORS 预检失败。缓冲 body 后请求变为普通 POST。\n *\n * 不要把带 init 的任意 fetch 失败收成 502：AbortError / 普通网络错误若变成\n * “成功的 502 响应”，播放器会把非 JSON 当 innertube 结果，表现为无时长、无 src。\n * 仅 duplex TypeError 才返回 502，避免 bundle 合成误导性 200 load fail。\n */\n\nfunction sanitizeUrl(u) {\n  try {\n    const x = new URL(typeof u === 'string' ? u : (u && u.url) || '')\n    return x.origin + x.pathname\n  } catch (err) {\n    return '[unparseable-url]'\n  }\n}\n\nfunction isDuplexTypeError(err) {\n  const name = (err && err.name) || ''\n  const message = String((err && err.message) || err)\n  return name === 'TypeError' && /duplex/i.test(message)\n}\n\n/**\n * 原地改 init：流 body → ArrayBuffer（空流则删除 body）。\n * 必须写回同一对象，bundle 重试时仍用这个 init。\n * @param {RequestInit} init\n * @returns {Promise<RequestInit>}\n */\nasync function prepareOutgoingInit(init) {\n  const out = init || {}\n  const body = out.body\n  if (body && typeof body.getReader === 'function') {\n    const buf = await new Response(body).arrayBuffer()\n    if (buf.byteLength > 0) {\n      out.body = buf\n    } else {\n      delete out.body\n    }\n    delete out.duplex\n  }\n  return out\n}\n\nfunction installJsproxyYtTestFetchWrap(global) {\n  const rawFetch = global.fetch.bind(global)\n\n  global.fetch = async function (input, init) {\n    if (init !== undefined) {\n      await prepareOutgoingInit(init)\n    }\n    try {\n      if (init !== undefined) {\n        return await rawFetch(input, init)\n      }\n      return await rawFetch(input)\n    } catch (err) {\n      if (init === undefined || !isDuplexTypeError(err)) {\n        throw err\n      }\n      const name = (err && err.name) || 'Error'\n      const message = String((err && err.message) || err).slice(0, 180)\n      const where = sanitizeUrl(typeof input === 'string' ? input : (input && input.url))\n      console.warn('[jsproxy-yt-test] fetch fail', name, message, where)\n      return new Response('jsproxy-yt-test fetch failed: ' + name + ':' + message, {\n        status: 502,\n        headers: {\n          'content-type': 'text/plain;charset=utf-8',\n          'access-control-expose-headers': '--jsproxy-test,--jsproxy-test-error,--s',\n          '--jsproxy-test': '1',\n          '--jsproxy-test-error': name + ':' + message,\n          '--s': '502',\n        },\n      })\n    }\n  }\n}\ninstallJsproxyYtTestFetchWrap(self);\n})();\n// </JSPROXY_YT_TEST_FETCH_WRAP>"
+var FETCH_WRAP_IIFE = "// <JSPROXY_YT_TEST_FETCH_WRAP>\n(function(){\n/**\n * SW 侧 fetch 包装：在作者 bundle.c33e24c5.js 调用 fetch(proxyUrl, init)\n * 之前把 ReadableStream body 缓冲成 ArrayBuffer，并写回同一个 init，\n * 以便 network.launch() 的重试循环能复用正文。\n *\n * 这是针对 Chrome 105+ 的构造期异常：\n *   TypeError: Failed to execute 'fetch' on 'WorkerGlobalScope':\n *   The 'duplex' member must be specified for a request with a streaming body\n *\n * 评估结论：只加 duplex half 能过构造检查，但对 /http/ 代理路径仍会\n * 因流式上传 CORS 预检失败。缓冲 body 后请求变为普通 POST。\n *\n * 不要把带 init 的任意 fetch 失败收成 502：AbortError / 普通网络错误若变成\n * “成功的 502 响应”，播放器会把非 JSON 当 innertube 结果，表现为无时长、无 src。\n * 仅 duplex TypeError 才返回 502，避免 bundle 合成误导性 200 load fail。\n */\n\nfunction sanitizeUrl(u) {\n  try {\n    const x = new URL(typeof u === 'string' ? u : (u && u.url) || '')\n    return x.origin + x.pathname\n  } catch (err) {\n    return '[unparseable-url]'\n  }\n}\n\nfunction isDuplexTypeError(err) {\n  const name = (err && err.name) || ''\n  const message = String((err && err.message) || err)\n  return name === 'TypeError' && /duplex/i.test(message)\n}\n\n/**\n * 原地改 init：流 body → ArrayBuffer（空流则删除 body）。\n * 必须写回同一对象，bundle 重试时仍用这个 init。\n * @param {RequestInit} init\n * @returns {Promise<RequestInit>}\n */\nconst REQMAP_HEADER = 'x-jsproxy-reqmap'\n\nfunction packedQueryFromReferrer(referrer) {\n  if (typeof referrer !== 'string') return ''\n  const qPos = referrer.indexOf('?')\n  if (qPos < 0) return ''\n  return referrer.slice(qPos + 1)\n}\n\n/**\n * 作者 bundle 把 cookie/origin 塞进 fetch referrer query。\n * Chrome ≥77 会把超过 4096 字节的 Referer 收成 origin，query 丢失。\n * 同 origin Worker 请求可另带 x-jsproxy-reqmap，不改 Origin 语义、不合成指纹。\n */\nfunction attachReqMapHeader(init) {\n  const out = init || {}\n  const packed = packedQueryFromReferrer(out.referrer)\n  if (!packed) return out\n  const headers = new Headers(out.headers || undefined)\n  if (!headers.has(REQMAP_HEADER)) {\n    headers.set(REQMAP_HEADER, packed)\n  }\n  out.headers = headers\n  return out\n}\n\nasync function prepareOutgoingInit(init) {\n  const out = init || {}\n  const body = out.body\n  if (body && typeof body.getReader === 'function') {\n    const buf = await new Response(body).arrayBuffer()\n    if (buf.byteLength > 0) {\n      out.body = buf\n    } else {\n      delete out.body\n    }\n    delete out.duplex\n  }\n  attachReqMapHeader(out)\n  return out\n}\n\nfunction installJsproxyYtTestFetchWrap(global) {\n  const rawFetch = global.fetch.bind(global)\n\n  global.fetch = async function (input, init) {\n    if (init !== undefined) {\n      await prepareOutgoingInit(init)\n    }\n    try {\n      if (init !== undefined) {\n        return await rawFetch(input, init)\n      }\n      return await rawFetch(input)\n    } catch (err) {\n      if (init === undefined || !isDuplexTypeError(err)) {\n        throw err\n      }\n      const name = (err && err.name) || 'Error'\n      const message = String((err && err.message) || err).slice(0, 180)\n      const where = sanitizeUrl(typeof input === 'string' ? input : (input && input.url))\n      console.warn('[jsproxy-yt-test] fetch fail', name, message, where)\n      return new Response('jsproxy-yt-test fetch failed: ' + name + ':' + message, {\n        status: 502,\n        headers: {\n          'content-type': 'text/plain;charset=utf-8',\n          'access-control-expose-headers': '--jsproxy-test,--jsproxy-test-error,--s',\n          '--jsproxy-test': '1',\n          '--jsproxy-test-error': name + ':' + message,\n          '--s': '502',\n        },\n      })\n    }\n  }\n}\ninstallJsproxyYtTestFetchWrap(self);\n})();\n// </JSPROXY_YT_TEST_FETCH_WRAP>"
 /* <FETCH_WRAP_IIFE_END> */
 
 function swScript() {
@@ -319,8 +320,294 @@ async function handleTestInfo(req) {
     wrapInPlaceBody: true,
     wrapAbortRethrow: true,
     jsfilterPatch: 'postMessage-call-only',
+    multiCookieNumbered: true,
+    reqmapHeader: REQMAP_HEADER,
+    hopHeaderStrip: true,
     playbackNotGuaranteed: true,
+    botGateIndependent: true,
   })
+}
+
+function packedQueryFromReferrer(referrer) {
+  if (typeof referrer !== 'string') return ''
+  var qPos = referrer.indexOf('?')
+  if (qPos < 0) return ''
+  return referrer.substr(qPos + 1)
+}
+
+function shouldDropHopHeader(key) {
+  var k = String(key).toLowerCase()
+  if (
+    k === 'host' ||
+    k === 'connection' ||
+    k === 'keep-alive' ||
+    k === 'proxy-connection' ||
+    k === 'transfer-encoding' ||
+    k === 'te' ||
+    k === 'trailer' ||
+    k === 'upgrade' ||
+    k === 'cookie' ||
+    k === 'origin' ||
+    k === 'referer' ||
+    k === 'referrer' ||
+    k === REQMAP_HEADER ||
+    k === 'x-forwarded-for' ||
+    k === 'x-forwarded-proto' ||
+    k === 'x-real-ip'
+  ) {
+    return true
+  }
+  if (k.indexOf('cf-') === 0) return true
+  if (k.indexOf('sec-fetch-') === 0) return true
+  return false
+}
+
+function readPackedReqMap(reqHdr) {
+  var packed = reqHdr.get(REQMAP_HEADER)
+  if (packed) return packed
+  return packedQueryFromReferrer(reqHdr.get('referer') || reqHdr.get('referrer') || '')
+}
+
+function restoreOriginRequestHeaders(reqHdrRaw) {
+  var incomingUa = reqHdrRaw.get('user-agent')
+  var reqHdrNew = new Headers()
+  reqHdrRaw.forEach(function (val, key) {
+    if (shouldDropHopHeader(key)) return
+    reqHdrNew.set(key, val)
+  })
+
+  var packed = readPackedReqMap(reqHdrRaw)
+  var restored = {}
+  var acehOld = false
+  var rawLen = ''
+
+  if (packed) {
+    var param = new URLSearchParams(packed)
+    param.forEach(function (v, k) {
+      restored[k] = true
+      if (k.substr(0, 2) === '--') {
+        if (k.substr(2) === 'aceh') acehOld = true
+        if (k.substr(2) === 'raw-info') {
+          rawLen = String(v).split('|')[1] || ''
+        }
+      } else if (v) {
+        reqHdrNew.set(k, v)
+      } else {
+        reqHdrNew.delete(k)
+      }
+    })
+    if (!param.has('referer')) reqHdrNew.delete('referer')
+  }
+
+  if (!restored['user-agent'] && incomingUa) {
+    reqHdrNew.set('user-agent', incomingUa)
+  }
+  reqHdrNew.set('x-jsproxy', '1')
+  reqHdrNew.delete(REQMAP_HEADER)
+  return { reqHdrNew: reqHdrNew, acehOld: acehOld, rawLen: rawLen, restored: restored, packed: packed || '' }
+}
+
+function collectSetCookie(headers) {
+  if (headers && typeof headers.getSetCookie === 'function') {
+    var arr = headers.getSetCookie()
+    if (arr && arr.length) return arr.slice()
+  }
+  if (headers && typeof headers.getAll === 'function') {
+    try {
+      var all = headers.getAll('set-cookie')
+      if (all && all.length) return all.slice()
+    } catch (err) {}
+  }
+  var one = headers && headers.get('set-cookie')
+  return one ? [one] : []
+}
+
+function encodeEscapedResHeaders(resHdrOld, acehOld) {
+  var resHdrNew = new Headers()
+  var expose = '*'
+  resHdrOld.forEach(function (val, key) {
+    if (key === 'set-cookie') return
+    if (
+      key === 'access-control-allow-origin' ||
+      key === 'access-control-expose-headers' ||
+      key === 'location'
+    ) {
+      resHdrNew.set('--' + key, val)
+      return
+    }
+    resHdrNew.set(key, val)
+  })
+  var cookies = collectSetCookie(resHdrOld)
+  if (cookies.length === 1) {
+    resHdrNew.set('--set-cookie', cookies[0])
+    if (acehOld) expose += ',--set-cookie'
+  } else if (cookies.length > 1) {
+    for (var i = 0; i < cookies.length; i++) {
+      var name = i + 1 + '-set-cookie'
+      resHdrNew.set(name, cookies[i])
+      if (acehOld) expose += ',' + name
+    }
+  }
+  return { resHdrNew: resHdrNew, expose: expose, cookies: cookies }
+}
+
+function encodeSetCookieV122Collapsed(resHdrOld) {
+  var resHdrNew = new Headers()
+  resHdrOld.forEach(function (val, key) {
+    if (
+      key === 'access-control-allow-origin' ||
+      key === 'access-control-expose-headers' ||
+      key === 'location' ||
+      key === 'set-cookie'
+    ) {
+      resHdrNew.set('--' + key, val)
+    }
+  })
+  return resHdrNew
+}
+
+function getResInfo(res) {
+  var rawHeaders = res.headers
+  var status = res.status
+  var cookieStrArr = []
+  var headers = new Headers()
+  rawHeaders.forEach(function (val, key) {
+    if (key === 'access-control-allow-origin' || key === 'access-control-expose-headers') return
+    if (key === '--s') {
+      status = +val
+      return
+    }
+    if (key === '--t') return
+    var m = key.match(/^\d+-(.+)/)
+    if (m) {
+      key = m[1]
+      if (key === 'set-cookie') cookieStrArr.push(val)
+      else headers.append(key, val)
+      return
+    }
+    if (key.indexOf('--') === 0) key = key.substr(2)
+    if (key === 'set-cookie') {
+      cookieStrArr.push(val)
+      return
+    }
+    headers.set(key, val)
+  })
+  return { status: status, headers: headers, cookieStrArr: cookieStrArr }
+}
+
+function rebuildProxyTarget(pathnameFromHttp) {
+  return newUrl(String(pathnameFromHttp).replace(/^(https?):\/+/, '$1://'))
+}
+
+function syntheticOriginResponse(kind) {
+  var headers = new Headers({ 'content-type': 'application/json; charset=utf-8' })
+  headers.append(
+    'set-cookie',
+    'SID=syn.sid; Domain=.google.com; Path=/; Secure; HttpOnly; Expires=Wed, 21 Oct 2030 07:28:00 GMT'
+  )
+  headers.append('set-cookie', 'HSID=syn.hsid; Domain=.google.com; Path=/; Secure; HttpOnly')
+  headers.append('set-cookie', '__Host-GAPS=syn.gaps; Path=/; Secure; HttpOnly')
+  if (kind === 'redirect') {
+    headers.set(
+      'location',
+      'https://accounts.google.com/ServiceLogin?continue=' +
+        encodeURIComponent('https://www.youtube.com/watch?v=jNQXAC9IVRw')
+    )
+    return new Response('{"synthetic":true,"kind":"redirect"}', { status: 302, headers: headers })
+  }
+  return new Response('{"synthetic":true,"kind":"cookies"}', { status: 200, headers: headers })
+}
+
+async function handleTestCompat(req) {
+  var url = new URL(req.url)
+  var caseName = url.searchParams.get('case') || 'all'
+
+  var originRes = syntheticOriginResponse('cookies')
+  var v122Hdr = encodeSetCookieV122Collapsed(originRes.headers)
+  var v123 = encodeEscapedResHeaders(originRes.headers, false)
+  var parsed122 = getResInfo(new Response('', { headers: v122Hdr }))
+  var parsed123 = getResInfo(new Response('', { headers: v123.resHdrNew }))
+
+  var longCookie = 'SYN=' + 'x'.repeat(4500)
+  var reqMap = new URLSearchParams({
+    '--ver': TEST_VER,
+    '--mode': 'navigate',
+    origin: 'https://www.youtube.com',
+    referer: 'https://www.youtube.com/watch?v=jNQXAC9IVRw',
+    cookie: longCookie,
+  }).toString()
+  var incoming = new Headers({
+    'user-agent': 'Mozilla/5.0 jsproxy-yt-test-synthetic',
+    origin: 'https://yt-test.example',
+    referer: 'https://yt-test.example/',
+    cookie: 'workerSite=1',
+    'sec-fetch-site': 'same-origin',
+    'sec-fetch-mode': 'cors',
+    'cf-connecting-ip': '0.0.0.0',
+  })
+  incoming.set(REQMAP_HEADER, reqMap)
+  var restored = restoreOriginRequestHeaders(incoming)
+
+  var continueRaw =
+    'https://accounts.google.com/ServiceLogin?continue=' +
+    encodeURIComponent('https://www.youtube.com/watch?v=jNQXAC9IVRw')
+  var rebuilt = rebuildProxyTarget('https://accounts.google.com/ServiceLogin?continue=' + encodeURIComponent('https://www.youtube.com/watch?v=jNQXAC9IVRw'))
+  var continueHost = null
+  var continueVal = rebuilt && rebuilt.searchParams.get('continue')
+  try {
+    continueHost = continueVal ? new URL(continueVal).host : null
+  } catch (err) {
+    continueHost = 'unparseable'
+  }
+
+  var out = {
+    tag: TEST_TAG,
+    testVer: TEST_VER,
+    caseName: caseName,
+    isolatedTest: true,
+    playbackNotGuaranteed: true,
+    botGateIndependent: true,
+    v122CookieNames: parsed122.cookieStrArr.map(function (s) {
+      return s.split('=')[0]
+    }),
+    v123CookieNames: parsed123.cookieStrArr.map(function (s) {
+      return s.split('=')[0]
+    }),
+    v122LostCookies: parsed122.cookieStrArr.length < 3,
+    v123KeptAllCookies: parsed123.cookieStrArr.length === 3,
+    gapsKept: parsed123.cookieStrArr.some(function (s) {
+      return s.indexOf('__Host-GAPS=') === 0
+    }),
+    expiresCommaIntact: parsed123.cookieStrArr.some(function (s) {
+      return /Expires=Wed, 21 Oct 2030/.test(s)
+    }),
+    restoredOrigin: restored.reqHdrNew.get('origin'),
+    restoredCookieLen: (restored.reqHdrNew.get('cookie') || '').length,
+    restoredCookieHasSyn: /SYN=/.test(restored.reqHdrNew.get('cookie') || ''),
+    restoredUa: restored.reqHdrNew.get('user-agent'),
+    leakedWorkerOrigin: restored.reqHdrNew.get('origin') === 'https://yt-test.example',
+    leakedWorkerCookie: /workerSite=/.test(restored.reqHdrNew.get('cookie') || ''),
+    leakedSecFetch: restored.reqHdrNew.get('sec-fetch-site'),
+    leakedCf: restored.reqHdrNew.get('cf-connecting-ip'),
+    continueHost: continueHost,
+    continueIsYoutube: continueHost === 'www.youtube.com',
+    continueRawLen: continueRaw.length,
+    reqmapUsed: restored.packed.length > 0,
+  }
+  out.pass =
+    out.v122LostCookies &&
+    out.v123KeptAllCookies &&
+    out.gapsKept &&
+    out.expiresCommaIntact &&
+    out.restoredOrigin === 'https://www.youtube.com' &&
+    out.restoredCookieHasSyn &&
+    out.restoredUa === 'Mozilla/5.0 jsproxy-yt-test-synthetic' &&
+    out.leakedWorkerOrigin === false &&
+    out.leakedWorkerCookie === false &&
+    out.leakedSecFetch === null &&
+    out.leakedCf === null &&
+    out.continueIsYoutube === true
+  return makeJson(out)
 }
 
 async function httpHandler(req, pathname) {
@@ -328,8 +615,7 @@ async function httpHandler(req, pathname) {
     return new Response(null, { status: 204, headers: corsHeaders(PREFLIGHT_HEADERS) })
   }
 
-  var urlStr = pathname.replace(/^(https?):\/+/, '$1://')
-  var urlObj = newUrl(urlStr)
+  var urlObj = rebuildProxyTarget(pathname)
   if (!urlObj) {
     return makeRes('invalid proxy url', 403, { '--error': 'invalid-url' })
   }
@@ -350,34 +636,10 @@ async function httpHandler(req, pathname) {
     return Response.error()
   }
 
-  var acehOld = false
-  var rawLen = ''
-  var reqHdrNew = new Headers(reqHdrRaw)
-  reqHdrNew.set('x-jsproxy', '1')
-
-  var refer = reqHdrNew.get('referer') || reqHdrNew.get('referrer') || ''
-  var qPos = refer.indexOf('?')
-  if (qPos >= 0) {
-    var param = new URLSearchParams(refer.substr(qPos + 1))
-    param.forEach(function (v, k) {
-      if (k.substr(0, 2) === '--') {
-        if (k.substr(2) === 'aceh') acehOld = true
-        if (k.substr(2) === 'raw-info') {
-          var parts = String(v).split('|')
-          rawLen = parts[1] || ''
-        }
-      } else if (v) {
-        reqHdrNew.set(k, v)
-      } else {
-        reqHdrNew.delete(k)
-      }
-    })
-    if (!param.has('referer')) reqHdrNew.delete('referer')
-  }
-
+  var restored = restoreOriginRequestHeaders(reqHdrRaw)
   var reqInit = {
     method: req.method,
-    headers: reqHdrNew,
+    headers: restored.reqHdrNew,
     redirect: 'manual',
   }
   if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -397,22 +659,10 @@ async function httpHandler(req, pathname) {
     })
   }
 
-  var resHdrOld = res.headers
-  var resHdrNew = new Headers(resHdrOld)
-  var expose = '*'
-  resHdrOld.forEach(function (val, key) {
-    if (
-      key === 'access-control-allow-origin' ||
-      key === 'access-control-expose-headers' ||
-      key === 'location' ||
-      key === 'set-cookie'
-    ) {
-      resHdrNew.set('--' + key, val)
-      resHdrNew.delete(key)
-    }
-  })
-
-  if (acehOld) {
+  var encoded = encodeEscapedResHeaders(res.headers, restored.acehOld)
+  var resHdrNew = encoded.resHdrNew
+  var expose = encoded.expose
+  if (restored.acehOld) {
     expose = expose + ',--s'
     resHdrNew.set('--t', '1')
   }
@@ -449,6 +699,7 @@ async function handleRequest(req) {
   }
 
   if (pathname === '/__test__/info') return handleTestInfo(req)
+  if (pathname === '/__test__/compat') return handleTestCompat(req)
   if (pathname === '/__test__/sink') return handleTestSink(req)
   if (pathname === '/__test__/range') return handleTestRange(req)
   if (pathname === '/__test__/status') {
@@ -508,6 +759,13 @@ self.__JSPROXY_YT_TEST__ = {
   handleRequest: handleRequest,
   swScript: swScript,
   patchAuthorBundle: patchAuthorBundle,
+  REQMAP_HEADER: REQMAP_HEADER,
+  restoreOriginRequestHeaders: restoreOriginRequestHeaders,
+  collectSetCookie: collectSetCookie,
+  encodeEscapedResHeaders: encodeEscapedResHeaders,
+  encodeSetCookieV122Collapsed: encodeSetCookieV122Collapsed,
+  getResInfo: getResInfo,
+  rebuildProxyTarget: rebuildProxyTarget,
 }
 
 self.addEventListener('fetch', function (event) {
