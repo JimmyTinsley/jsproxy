@@ -73,7 +73,7 @@ function extractWrap(api) {
 async function nodeContractTests(api) {
   console.log('\n== Node contract ==')
   assert('tag', api.tag === 'jsproxy-yt-test', api.tag)
-  assert('ver', api.testVer === '121', api.testVer)
+  assert('ver', api.testVer === '122', api.testVer)
   assert('allow youtube', api.hostAllowed('www.youtube.com') === true)
   assert('allow googlevideo', api.hostAllowed('rr1---sn-abc.googlevideo.com') === true)
   assert('allow ytimg', api.hostAllowed('i.ytimg.com') === true)
@@ -95,7 +95,8 @@ async function nodeContractTests(api) {
     wrapLogic.includes('delete out.duplex') && !/duplex:\s*['"]half['"]/.test(wrapLogic)
   )
   assert('conf disables static_boost', api.swScript().includes("assets_cdn+'bundle.c33e24c5.js'") || workerSrc.includes('static_boost: { enable: false'))
-  assert('conf ver 121', workerSrc.includes("TEST_VER = '121'") && api.swScript().includes('jsproxy-yt-test sw 121'))
+  assert('conf ver 122', workerSrc.includes("TEST_VER = '122'") && api.swScript().includes('jsproxy-yt-test sw 122'))
+  assert('sw cache-busts patched bundle', api.swScript().includes('bundle.c33e24c5.js?jsproxy-yt-test=122'))
   assert('frontend wrap exported', wrapSrc.includes('prepareOutgoingInit') && wrapSrc.includes('installJsproxyYtTestFetchWrap'))
   assert('sw embeds frontend wrap', api.swScript().includes('prepareOutgoingInit') && api.swScript().includes('installJsproxyYtTestFetchWrap(self)'))
   assert('no production host hardcoded as ASSET_URL default', !workerSrc.includes("ASSET_URL = 'https://etherdream.github.io/jsproxy'") || workerSrc.includes('UPSTREAM_STATIC'))
@@ -114,6 +115,7 @@ async function workerHttpTests(api) {
   assert('info 200', info.status === 200)
   assert('info isolated', infoJson.isolatedTest === true && infoJson.playbackNotGuaranteed === true)
   assert('info wrap reuse flags', infoJson.wrapInPlaceBody === true && infoJson.wrapAbortRethrow === true)
+  assert('info jsfilter patch flag', infoJson.jsfilterPatch === 'postMessage-call-only')
   assert('info boost off', infoJson.staticBoost === false)
   assert('info --jsproxy-test', info.headers.get('--jsproxy-test') === '1')
 
@@ -246,6 +248,16 @@ function startServer(api, port) {
 <script>
 (async () => {
   try {
+    async function reportSyntax(k, code) {
+      try {
+        new Function(code)
+        await fetch('/__test__/sink?k=' + k, { method: 'POST', body: 'parsed-ok' })
+      } catch (e) {
+        await fetch('/__test__/sink?k=' + k, { method: 'POST', body: String(e && e.message || e) })
+      }
+    }
+    await reportSyntax('syntax-up', 'function postMessage(...(self.__set_srcWin?__set_srcWin():[]), x){return x}')
+    await reportSyntax('syntax-fx', 'const o={postMessage(x){return x}}; o.postMessage(...(self.__set_srcWin?__set_srcWin():[]), 1)')
     new Worker('/dw-wrap-test.js')
     await navigator.serviceWorker.register('/sw-wrap-test.js', { scope: '/' })
     await navigator.serviceWorker.ready
@@ -323,6 +335,7 @@ function startServer(api, port) {
           pathname: parsed.pathname,
           k: parsed.searchParams.get('k'),
           bytes: buf.length,
+          preview: parsed.pathname === '/__test__/sink' ? buf.toString('utf8').slice(0, 180) : '',
           status: response.status,
           error: response.headers.get('--error'),
           ctype: response.headers.get('content-type') || '',
@@ -384,6 +397,8 @@ async function chromeTests(port, started) {
     await waitForEvents(
       started.events,
       (ev) =>
+        ev.some((e) => e.k === 'syntax-up') &&
+        ev.some((e) => e.k === 'syntax-fx') &&
         ev.some((e) => e.k === 'dw-empty') &&
         ev.some((e) => e.k === 'dw-nonempty') &&
         ev.some((e) => e.k === 'sw-empty') &&
@@ -425,6 +440,14 @@ async function chromeTests(port, started) {
   assert('denied 403', denied && denied.error === 'host-denied', JSON.stringify(denied))
   assert('preflight 204', !!pre, JSON.stringify(pre))
   assert('error 404 not html 200', e404 && e404.status === 404 && !/text\/html/.test(e404.ctype || ''), JSON.stringify(e404))
+  const synUp = findEvent(ev, (e) => e.k === 'syntax-up')
+  const synFx = findEvent(ev, (e) => e.k === 'syntax-fx')
+  assert(
+    'chrome upstream jsfilter Unexpected token (',
+    synUp && /Unexpected token '\('/.test(synUp.preview || ''),
+    JSON.stringify(synUp)
+  )
+  assert('chrome fixed member-call parses', synFx && synFx.preview === 'parsed-ok', JSON.stringify(synFx))
 }
 
 async function wrapUnitTest() {
@@ -537,6 +560,87 @@ async function wrapUnitTest() {
   assert('wrap rethrows non-duplex TypeError', netThrew === true)
 }
 
+async function jsfilterParseTest(api) {
+  console.log('\n== jsfilter parse (offline) ==')
+  const { parseStrUpstream, parseStrFixed, patchAuthorBundle, UPSTREAM_POSTMESSAGE_SITE } = await import(
+    '../frontend/jsfilter.js'
+  )
+  const fnDef = 'function postMessage(x){return x}'
+  const method = 'const o={postMessage(x){return x}}; o.postMessage(1)'
+  const origFn = (() => {
+    try {
+      new vm.Script(fnDef)
+      return true
+    } catch {
+      return false
+    }
+  })()
+  const upFn = parseStrUpstream(fnDef)
+  let upErr = ''
+  try {
+    new vm.Script(upFn)
+  } catch (err) {
+    upErr = String(err.message)
+  }
+  const fxFn = parseStrFixed(fnDef)
+  assert('orig function postMessage parses', origFn === true)
+  assert('upstream rewrite is function postMessage(...(', /function postMessage\(\.\.\.\(self\.__set_srcWin/.test(upFn || ''))
+  assert('upstream rewrite Unexpected token (', /Unexpected token '\('/.test(upErr), upErr)
+  assert('fixed rewrite skips function def', fxFn == null)
+
+  const upMethod = parseStrUpstream(method)
+  let upMethodErr = ''
+  try {
+    new vm.Script(upMethod)
+  } catch (err) {
+    upMethodErr = String(err.message)
+  }
+  const fxMethod = parseStrFixed(method)
+  assert('orig method shorthand parses', true)
+  assert('upstream method rewrite Unexpected token (', /Unexpected token '\('/.test(upMethodErr), upMethodErr)
+  assert('fixed method def kept, call rewritten', fxMethod && fxMethod.includes('{postMessage(x){return x}}') && fxMethod.includes('o.postMessage(...(self.__set_srcWin'))
+  try {
+    new vm.Script(fxMethod)
+    pass('fixed method+call parses')
+  } catch (err) {
+    fail('fixed method+call parses', String(err.message))
+  }
+
+  const loc = parseStrUpstream('const location={href:"x"}; location.href')
+  try {
+    new vm.Script(loc)
+    pass('location rewrite still parses')
+  } catch (err) {
+    fail('location rewrite still parses', String(err.message))
+  }
+
+  const snippet = 'foo' + UPSTREAM_POSTMESSAGE_SITE + 'bar'
+  assert('patch unique site', patchAuthorBundle(snippet) === 'foo.replace(/\\.postMessage\\s*\\(/g,bar')
+  let threw = false
+  try {
+    patchAuthorBundle('no site here')
+  } catch {
+    threw = true
+  }
+  assert('patch rejects missing site', threw === true)
+  assert('worker exports patchAuthorBundle', typeof api.patchAuthorBundle === 'function')
+
+  const res = await fetch('https://etherdream.github.io/jsproxy/assets/bundle.c33e24c5.js')
+  assert('author bundle fetch', res.ok, String(res.status))
+  if (res.ok) {
+    const bundle = await res.text()
+    const patched = api.patchAuthorBundle(bundle)
+    assert('author bundle has one rewrite site', bundle.includes('.replace(/postMessage\\s*\\(/g,'))
+    assert('patched bundle uses call-only rewrite', patched.includes('.replace(/\\.postMessage\\s*\\(/g,') && !patched.includes('.replace(/postMessage\\s*\\(/g,'))
+    try {
+      new vm.Script(patched, { filename: 'bundle.patched.js' })
+      pass('patched bundle still parses')
+    } catch (err) {
+      fail('patched bundle still parses', String(err.message))
+    }
+  }
+}
+
 function writeArtifact(api) {
   const outDir = '/opt/cursor/artifacts'
   mkdirSync(outDir, { recursive: true })
@@ -570,6 +674,7 @@ const PORT = 8791
 const apiBundle = loadWorker()
 await nodeContractTests(apiBundle.api)
 await wrapUnitTest()
+await jsfilterParseTest(apiBundle.api)
 await workerHttpTests(apiBundle.api)
 const started = await startServer(apiBundle.api, PORT)
 try {

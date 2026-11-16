@@ -15,7 +15,7 @@
  */
 
 var TEST_TAG = 'jsproxy-yt-test'
-var TEST_VER = '121'
+var TEST_VER = '122'
 var JS_VER = 10
 var BUNDLE_NAME = 'bundle.c33e24c5.js'
 var UPSTREAM_STATIC = 'https://etherdream.github.io/jsproxy'
@@ -103,6 +103,24 @@ function newUrl(urlStr) {
   }
 }
 
+/** 作者 bundle 里 jsfilter 的唯一 postMessage 改写点；只收窄到成员调用。 */
+var BUNDLE_POSTMESSAGE_SITE = '.replace(/postMessage\\s*\\(/g,'
+var BUNDLE_POSTMESSAGE_PATCH = '.replace(/\\.postMessage\\s*\\(/g,'
+
+function patchAuthorBundle(text) {
+  var src = String(text)
+  var n = 0
+  var pos = 0
+  while ((pos = src.indexOf(BUNDLE_POSTMESSAGE_SITE, pos)) !== -1) {
+    n++
+    pos += BUNDLE_POSTMESSAGE_SITE.length
+  }
+  if (n !== 1) {
+    throw new Error('jsfilter postMessage rewrite site count=' + n)
+  }
+  return src.replace(BUNDLE_POSTMESSAGE_SITE, BUNDLE_POSTMESSAGE_PATCH)
+}
+
 /**
  * SW 内嵌包装。由 `node cf-worker-test/build.mjs` 从 frontend/fetch-wrap.js 生成。
  * 缓冲流 body，失败返回 502 而不是抛给 bundle 变成 200 load fail。
@@ -115,7 +133,7 @@ function swScript() {
   return [
     '/* ' + TEST_TAG + ' sw ' + TEST_VER + ' */',
     FETCH_WRAP_IIFE,
-    "jsproxy_config=x=>{__CONF__=x;importScripts(__FILE__=x.assets_cdn+'" + BUNDLE_NAME + "')};",
+    "jsproxy_config=x=>{__CONF__=x;importScripts(__FILE__=x.assets_cdn+'" + BUNDLE_NAME + '?jsproxy-yt-test=' + TEST_VER + "')};",
     "importScripts('conf.js');",
   ].join('\n')
 }
@@ -206,6 +224,25 @@ async function serveStaticAsset(rel) {
       'content-type': 'text/plain; charset=utf-8',
     })
   }
+  if (rel === BUNDLE_NAME) {
+    try {
+      var bundleItem = await cachedUpstream('/assets/' + BUNDLE_NAME)
+      if (!bundleItem.status || bundleItem.status >= 400) {
+        return makeRes('upstream bundle status ' + bundleItem.status, 502, { '--error': 'bundle-upstream' })
+      }
+      var bundleText = new TextDecoder().decode(bundleItem.buf)
+      var patched = patchAuthorBundle(bundleText)
+      return makeRes(patched, 200, {
+        'content-type': 'application/javascript; charset=utf-8',
+        'cache-control': 'no-store',
+        '--jsproxy-test-bundle': 'jsfilter-postMessage-call-only',
+      })
+    } catch (err) {
+      return makeRes('bundle patch fail: ' + String((err && err.message) || err), 502, {
+        '--error': 'bundle-patch',
+      })
+    }
+  }
   var path = '/assets/' + rel.replace(/^\/+/, '')
   try {
     return serveCached(await cachedUpstream(path))
@@ -281,6 +318,7 @@ async function handleTestInfo(req) {
     allowedHostSuffixes: ALLOWED_HOST_SUFFIXES,
     wrapInPlaceBody: true,
     wrapAbortRethrow: true,
+    jsfilterPatch: 'postMessage-call-only',
     playbackNotGuaranteed: true,
   })
 }
@@ -469,6 +507,7 @@ self.__JSPROXY_YT_TEST__ = {
   sanitizeUrl: sanitizeUrl,
   handleRequest: handleRequest,
   swScript: swScript,
+  patchAuthorBundle: patchAuthorBundle,
 }
 
 self.addEventListener('fetch', function (event) {

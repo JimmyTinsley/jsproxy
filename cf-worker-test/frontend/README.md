@@ -16,7 +16,8 @@
 1. **主修复**：`fetch-wrap.js` 在 SW 里包装 `fetch`，流 body → `arrayBuffer()` 并 **写回同一 init**（`network.launch()` 最多重试 5 次，不能只改副本）。空流则省略 body。不把 duplex half 当充分方案。
 2. **诊断**：仅 duplex TypeError 返回 **502** + `--jsproxy-test-error`。AbortError / 普通 Failed to fetch **必须再抛**，否则播放器会把 502 文本当成 innertube JSON。
 3. **日志**：只打 `origin + pathname`，丢掉 query（签名/`n`/token）。
-4. **未改作者 bundle 字节**：由测试 origin 提供 `/assets/bundle.c33e24c5.js`。
+4. **jsfilter**：作者 `jsfilter.parseStr` 用 `/postMessage\s*\(/` 改所有 script。对 `function postMessage(` / 方法简写会变成非法形参，V8 报 `SyntaxError: Unexpected token '('`。测试 Worker 在提供 `bundle.c33e24c5.js` 时把该正则收窄为 `/\.postMessage\s*\(/`（只改成员调用）。源码见 `jsfilter.js`。
+5. 未拿到用户截图里那份截断名 `kevlar_base_module…sync_mod_chunk` 的原始字节，因此不能声称已核对 5756:156；能核对的是同一改写规则的最小 case 与作者 bundle 中的唯一改写点。
 
 若以后要重建 bundle，等价源码补丁见 `network.launch.js`。
 

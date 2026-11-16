@@ -1,76 +1,57 @@
 # jsproxy YouTube 隔离测试 Worker
 
-**这是隔离测试版，不是生产 `https://js.jimmytinsley.com`，也不承诺 YouTube 能播。**
+**这是隔离测试版，不是生产 `https://js.jimmytinsley.com`，也不承诺 YouTube 能播。修 homepage 语法 ≠ 能播。**
 
-生产 Worker、DNS、`master`、`gh-pages`、Pages 开关、生产 `ASSET_URL` 都不要动。覆盖部署时只更新已有测试 Worker `jsproxy-yt-test-20261115`，粘贴本目录 [`worker.js`](./worker.js)。
+生产 Worker、DNS、`master`、`gh-pages`、Pages、生产 `ASSET_URL` 都不要动。只覆盖测试 Worker `jsproxy-yt-test-20261115`。
 
-当前 conf.ver：**121**（必须递增，已安装的测试 SW 才会换新脚本）。
+当前 conf.ver：**122**。
 
-## 这个测试版改了什么
+## v122：homepage `SyntaxError: Unexpected token '('`
 
-已复现的根因：作者 `bundle.c33e24c5.js` 在 SW 里对 POST `ReadableStream` 调用 `fetch(url, init)`，Chrome 抛 duplex TypeError，随后合成误导性 **200** `text/html` `load fail`。
+用户在 `.../-----https://www.youtube.com/` 灰骨架，Console 红错为
 
-v121 相对 v120 的修正（针对真实 Chrome 回退：能打开 watch 页但无时长、video 无 src、无 videoplayback）：
+`Uncaught SyntaxError: Unexpected token '(' (at m=kevlar_base_module…sync_mod_chunk:5756:156)`
 
-1. 流 body **原地**写成 ArrayBuffer，写回同一个 `RequestInit`，让 `network.launch()` 重试能复用正文（之前只改副本，重试拿到已锁的空流）。
-2. **不再**把带 init 的任意 fetch 失败收成 502。AbortError / `Failed to fetch` 重新抛出。只有 duplex TypeError 才返回 502 + `--jsproxy-test-error`（避免 bundle 的假 200）。
-3. 首页去掉 `/__test__/info`、`/works` 链接：作者 SW 会把相对路径导航改成 `google.com/search?q=...`，从而进 Google/sorry。自检用 curl。
-4. 白名单补 `youtube-nocookie.com`（YouTube 公开嵌入域）。**不把 doubleclick 403 当根因**，也不为广告域开放代理。
+token 已确认为左括号 `(`，不是 `<`。脚本名中间截断，**没有完整 URL**。
 
-其它仍与 v120 相同：`static_boost` 关闭；`cors_v1.txt` 仍为空所以直连列表不生效（作者 cors 列表里也没有 youtube/gstatic，对播放器初始化差异很小）；节点只有 `mysite`；日志去敏。
+诊断机制（不猜测完整 URL、不打开 Google 挑战、不拉签名媒体）：
 
-## Dashboard 覆盖部署（你来操作）
+1. 作者 `bundle.c33e24c5.js` 对 **所有** `script` 做 `jsfilter.parseStr`：`/postMessage\s*\(/` 后面插入 `...(self.__set_srcWin?__set_srcWin():[]), `。
+2. 离线最小 case：`function postMessage(x){return x}` 与 `{postMessage(x){return x}}` **原文可 parse**；按作者规则改写后变成 `function postMessage(...(expr), x)`，Node/Chrome 均为 **`SyntaxError: Unexpected token '('`**。`location` 改写不会产生这个 token。
+3. 收窄为 `/\.postMessage\s*\(/` 后，定义保持合法，成员调用仍注入。作者 bundle 里该 replace **恰好一处**，测试 Worker 提供 bundle 时打补丁，`?jsproxy-yt-test=122` 避免旧 SW 缓存。
 
-1. 打开已有测试 Worker（不要动生产 `js.jimmytinsley.com`）。
-2. 粘贴 `cf-worker-test/worker.js` 或 `/opt/cursor/artifacts/worker.js`。
-3. Save and deploy。绑定 / 环境变量 / 密钥：**无**。compatibility_date：默认或 **`2024-11-11`**。
-4. 用隐私窗口打开测试 origin，确认 `/sw.js` 含 `jsproxy-yt-test sw 121`，或 curl `/__test__/info` 的 `testVer` 为 `"121"`。
+**未拿到** 截图中那份 `kevlar_base_module…sync_mod_chunk` 原始字节（禁止再请求 youtube.com 以免触发/重试 sorry），所以 **不能声称已核对 5756:156**。能核对的是：同一改写规则确实会把合法现代方法/函数定义打成用户看到的那类 SyntaxError。
 
-## 浏览器只读诊断（请先看这些，再判断能否播）
+watch 页 Google unusual traffic 是独立阻塞，本版不处理、不绕过。
 
-不要点页面上的相对路径自检，不要打开 Google/sorry 挑战。
+## 覆盖部署
 
-终端：
+粘贴 `cf-worker-test/worker.js` 或 `/opt/cursor/artifacts/worker.js`。绑定/变量/密钥：无。compatibility_date：默认或 `2024-11-11`。
 
 ```bash
 curl -sS https://jsproxy-yt-test-20261115.jimmytinsley.workers.dev/__test__/info
 ```
 
-应有 `"testVer": "121"`、`"wrapInPlaceBody": true`。
+应有 `"testVer": "122"`、`"jsfilterPatch": "postMessage-call-only"`。`/sw.js` 含 `jsproxy-yt-test sw 122`。
 
-然后用隐私窗口打开：
+隐私窗口打开 homepage：`.../-----https://www.youtube.com/`。看 Console 是否还出现 `Unexpected token '('`。黄字 manifest 跨源可忽略。不要点相对路径自检。
 
-`https://jsproxy-yt-test-20261115.jimmytinsley.workers.dev/-----https://www.youtube.com/watch?v=jNQXAC9IVRw`
-
-DevTools：
-
-1. **Document**：`watch?v=jNQXAC9IVRw` 的响应是否真是 YouTube HTML（能否搜到 `ytInitialPlayerResponse` / `lengthSeconds`），还是 302/312 去 `google.com/sorry`，或 `--error`。
-2. **XHR/fetch**：是否出现 `youtubei/v1/player`（或 `/youtubei/`）POST；状态是 JSON 200 还是 502/403；请求头是否有 jsproxy 的 `Referer: /?--ver=121...`。
-3. **Media**：点 Play 后是否出现 `videoplayback`；没有出现说明播放器数据阶段就停了，还没到媒体。
-4. **Console**：是否还有 `duplex` TypeError；是否有 `JSON.parse` / `innertube` 类异常。accounts iframe CSP 与 accounts 401 生产同样有，不要当新根因。doubleclick 403 在本测试版仍预期（未放行广告域）。
-5. **Elements**：`video` 的 `src` / `duration`。生产已知基线是能出现约 19 秒时长和 adaptiveFormats，再在媒体请求上因 duplex 挂；若 121 仍无时长，把上述 1–4 的有/无发回来。
-
-## 本地复现
+## 本地
 
 ```bash
 node cf-worker-test/build.mjs
 node cf-worker-test/tests/run.mjs
 ```
 
-覆盖：流 POST 缓冲与 **init 重用**、AbortError 再抛、GET/Range/预检/403、首页无自检链接。不请求签名媒体 URL，不走 Google sorry。
+当前产物（隔离测试版）：
 
-当前产物（隔离测试版，**不是** YouTube 已能播的承诺）：
-
-- 文件：`cf-worker-test/worker.js`（与 `/opt/cursor/artifacts/worker.js` 相同）
-- sha256：`7d19e16b2107b284b7d0053b20845422b5e80e7e9a5fcb2d3ecb3d86951e7d32`
-- 字节：19321
-- conf.ver / SW：`121`
-- compatibility_date 提示：`2024-11-11`
-- 绑定 / 环境变量 / 密钥：**无**
+- `cf-worker-test/worker.js` = `/opt/cursor/artifacts/worker.js`
+- sha256：`2dc2014a534bbcf8a0e2dca8300b0c4e051f0e89f56639e78981d3c2cee7828d`
+- 20818 bytes · conf.ver **122**
+- compatibility_date：`2024-11-11`；绑定/密钥：无
 
 ## 不可保证
 
-- 未请求 YouTube 私有 API、完整签名媒体 URL，也没有绕过封禁。
-- 本机对 `/http/https://www.youtube.com/watch?...` 的 curl 会遇到 Google sorry（生产 Worker 同样）；那不能代表你的浏览器会话。
-- 白名单仍不是开放代理。广告域 403 是刻意边界。
-- 覆盖部署后仍不承诺能播。
+- 未验证真实 kevlar 脚本 5756:156。
+- 修 homepage 语法不等于能播，也不等于 watch 能过人机验证。
+- 广告域仍 403。生产未改。
