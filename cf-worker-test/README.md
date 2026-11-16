@@ -2,84 +2,75 @@
 
 **这是隔离测试版，不是生产 `https://js.jimmytinsley.com`，也不承诺 YouTube 能播。**
 
-生产 Worker、DNS、`master`、`gh-pages`、Pages 开关、生产 `ASSET_URL` 都不要动。在 Cloudflare 仪表盘 **新建** 一个 Worker，粘贴 [`worker.js`](./worker.js)。
+生产 Worker、DNS、`master`、`gh-pages`、Pages 开关、生产 `ASSET_URL` 都不要动。覆盖部署时只更新已有测试 Worker `jsproxy-yt-test-20261115`，粘贴本目录 [`worker.js`](./worker.js)。
+
+当前 conf.ver：**121**（必须递增，已安装的测试 SW 才会换新脚本）。
 
 ## 这个测试版改了什么
 
-已复现的根因：作者 `bundle.c33e24c5.js` 在 SW 里对 POST `ReadableStream` 调用 `fetch(url, init)` 且 **没有缓冲 / 没有 duplex**，Chrome 在请求出站前抛：
+已复现的根因：作者 `bundle.c33e24c5.js` 在 SW 里对 POST `ReadableStream` 调用 `fetch(url, init)`，Chrome 抛 duplex TypeError，随后合成误导性 **200** `text/html` `load fail`。
 
-`TypeError: Failed to execute 'fetch' on 'WorkerGlobalScope': The 'duplex' member must be specified for a request with a streaming body`
+v121 相对 v120 的修正（针对真实 Chrome 回退：能打开 watch 页但无时长、video 无 src、无 videoplayback）：
 
-随后 bundle 把失败收成 **200 text/html `load fail`**，看起来像成功。
+1. 流 body **原地**写成 ArrayBuffer，写回同一个 `RequestInit`，让 `network.launch()` 重试能复用正文（之前只改副本，重试拿到已锁的空流）。
+2. **不再**把带 init 的任意 fetch 失败收成 502。AbortError / `Failed to fetch` 重新抛出。只有 duplex TypeError 才返回 502 + `--jsproxy-test-error`（避免 bundle 的假 200）。
+3. 首页去掉 `/__test__/info`、`/works` 链接：作者 SW 会把相对路径导航改成 `google.com/search?q=...`，从而进 Google/sorry。自检用 curl。
+4. 白名单补 `youtube-nocookie.com`（YouTube 公开嵌入域）。**不把 doubleclick 403 当根因**，也不为广告域开放代理。
 
-本测试 Worker：
+其它仍与 v120 相同：`static_boost` 关闭；`cors_v1.txt` 仍为空所以直连列表不生效（作者 cors 列表里也没有 youtube/gstatic，对播放器初始化差异很小）；节点只有 `mysite`；日志去敏。
 
-1. 自己下发新的 `/sw.js`（`conf.ver = 120`，`Cache-Control: no-store`），在 `importScripts` 作者 bundle **之前** 包装 `fetch`：把流 body `arrayBuffer()`；空流则变成无 body POST。
-2. **不把只加 `duplex:'half'` 当充分方案**（`/http/` 上的流式 CORS 预检仍会 Failed to fetch）。
-3. 包装器在带 init 的 fetch 失败时返回 **502** + `--jsproxy-test-error`，避免误导性 200。
-4. 日志只保留 `origin+pathname`，丢掉 query（签名 / `n` / token）。
-5. `static_boost` 关闭；`cors_v1.txt` 为空；节点只有 `mysite = location.host`。
-6. `/http/` 只允许 YouTube/Google 播放相关公开域；作者静态文件经本 origin 反代 `etherdream.github.io/jsproxy`（bundle 字节未改，但 URL 是测试 origin）。
+## Dashboard 覆盖部署（你来操作）
 
-权衡：为了让播放器依赖的 `www.google.com` / `accounts.google.com` / `*.gstatic.com` 等能过，白名单包含 `*.google.com`。这比「仅 youtube.com」宽，但仍拒绝 `example.com`、社交媒体等任意站点，**不是无鉴权全球代理**。
+1. 打开已有测试 Worker（不要动生产 `js.jimmytinsley.com`）。
+2. 粘贴 `cf-worker-test/worker.js` 或 `/opt/cursor/artifacts/worker.js`。
+3. Save and deploy。绑定 / 环境变量 / 密钥：**无**。compatibility_date：默认或 **`2024-11-11`**。
+4. 用隐私窗口打开测试 origin，确认 `/sw.js` 含 `jsproxy-yt-test sw 121`，或 curl `/__test__/info` 的 `testVer` 为 `"121"`。
 
-## Dashboard 部署（你来操作）
+## 浏览器只读诊断（请先看这些，再判断能否播）
 
-1. 打开 Cloudflare Dashboard → Workers & Pages → **Create**（新建，不要改现有 `js.jimmytinsley.com` 那个）。
-2. 把本目录 `worker.js`（或 `/opt/cursor/artifacts/worker.js`）全文粘贴进编辑器。
-3. Save and deploy。
-4. 绑定：无。环境变量：无。密钥：无。
-5. compatibility_date：仪表盘默认即可；若强制填写，用 **`2024-11-11`**。
-6. 记下 `https://<name>.<subdomain>.workers.dev`。
+不要点页面上的相对路径自检，不要打开 Google/sorry 挑战。
 
-## 浏览器试播（你来操作）
-
-1. 用 **未注册过生产 SW 的配置文件 / 隐私窗口** 打开测试 origin（不要用已经打开过 `js.jimmytinsley.com` 的同一配置，以免 SW 串缓存）。
-2. 应先看到「隔离测试版 SW 安装中」，刷新后出现测试首页。
-3. 打开 DevTools → Application → Service Workers，脚本应是测试 origin 的 `/sw.js`，内容含 `jsproxy-yt-test` 和 `prepareOutgoingInit`。
-4. 自检：`/__test__/info` 应有 `"isolatedTest": true`、`"testVer": "120"`。
-5. 首页默认链接是 `https://www.youtube.com/watch?v=jNQXAC9IVRw`，点打开。
-6. 点播放时再看 **videoplayback**（不要看遥测）：不应再出现 SW 构造期 duplex TypeError；若媒体仍失败，应看到 **非 200** 或 `--jsproxy-test-error` / `--s`，而不是 `load fail` 的假 200 HTML。
-7. 不要把测试结果理解成「YouTube 已修好」。
-
-## 本地复现
+终端：
 
 ```bash
-node cf-worker-test/tests/run.mjs
+curl -sS https://jsproxy-yt-test-20261115.jimmytinsley.workers.dev/__test__/info
 ```
 
-覆盖：空/非空 ReadableStream 经 SW 转发不再 TypeError、GET、Range 206、OPTIONS 预检、非白名单 403。不请求签名媒体 URL。
+应有 `"testVer": "121"`、`"wrapInPlaceBody": true`。
 
-## 文件
+然后用隐私窗口打开：
 
-| 路径 | 作用 |
-|---|---|
-| `worker.js` | 可粘贴部署的单文件（隔离测试产物） |
-| `build.mjs` | 把 `frontend/fetch-wrap.js` 嵌入 `worker.js` |
-| `frontend/fetch-wrap.js` | 可维护的 SW fetch 包装源码 |
-| `frontend/network.launch.js` | 若将来重建 bundle 的源码级补丁说明 |
-| `tests/run.mjs` | 本地测试 |
+`https://jsproxy-yt-test-20261115.jimmytinsley.workers.dev/-----https://www.youtube.com/watch?v=jNQXAC9IVRw`
 
-构建：
+DevTools：
+
+1. **Document**：`watch?v=jNQXAC9IVRw` 的响应是否真是 YouTube HTML（能否搜到 `ytInitialPlayerResponse` / `lengthSeconds`），还是 302/312 去 `google.com/sorry`，或 `--error`。
+2. **XHR/fetch**：是否出现 `youtubei/v1/player`（或 `/youtubei/`）POST；状态是 JSON 200 还是 502/403；请求头是否有 jsproxy 的 `Referer: /?--ver=121...`。
+3. **Media**：点 Play 后是否出现 `videoplayback`；没有出现说明播放器数据阶段就停了，还没到媒体。
+4. **Console**：是否还有 `duplex` TypeError；是否有 `JSON.parse` / `innertube` 类异常。accounts iframe CSP 与 accounts 401 生产同样有，不要当新根因。doubleclick 403 在本测试版仍预期（未放行广告域）。
+5. **Elements**：`video` 的 `src` / `duration`。生产已知基线是能出现约 19 秒时长和 adaptiveFormats，再在媒体请求上因 duplex 挂；若 121 仍无时长，把上述 1–4 的有/无发回来。
+
+## 本地复现
 
 ```bash
 node cf-worker-test/build.mjs
 node cf-worker-test/tests/run.mjs
 ```
 
-`tests/run.mjs` 会把 `worker.js` 复制到 `/opt/cursor/artifacts/worker.js` 并写出 sha256。单文件约 18KB，可直接 dashboard 粘贴。
+覆盖：流 POST 缓冲与 **init 重用**、AbortError 再抛、GET/Range/预检/403、首页无自检链接。不请求签名媒体 URL，不走 Google sorry。
 
 当前产物（隔离测试版，**不是** YouTube 已能播的承诺）：
 
 - 文件：`cf-worker-test/worker.js`（与 `/opt/cursor/artifacts/worker.js` 相同）
-- sha256：`55b57efec51e37d2ac2f2f29149ee52daab92f6079e5270f10b8808adee624d9`
-- 字节：18380
-- compatibility_date 提示：`2024-11-11`（仪表盘默认即可）
+- sha256：`7d19e16b2107b284b7d0053b20845422b5e80e7e9a5fcb2d3ecb3d86951e7d32`
+- 字节：19321
+- conf.ver / SW：`121`
+- compatibility_date 提示：`2024-11-11`
 - 绑定 / 环境变量 / 密钥：**无**
 
 ## 不可保证
 
-- 未请求 YouTube 私有 API、完整签名媒体 URL，也没有绕过任何封禁。
-- 未在 Cloudflare 上部署，未登录账号。真实 Chrome 试播由你完成。
-- 白名单含 `*.google.com` 是播放器/账号域权衡，不是开放代理；非白名单返回 **403**，不会伪装成 200 HTML。
-- 本仓库 `master` / `gh-pages` / 生产 Worker / DNS / Pages / 生产 `ASSET_URL` 都未改。
+- 未请求 YouTube 私有 API、完整签名媒体 URL，也没有绕过封禁。
+- 本机对 `/http/https://www.youtube.com/watch?...` 的 curl 会遇到 Google sorry（生产 Worker 同样）；那不能代表你的浏览器会话。
+- 白名单仍不是开放代理。广告域 403 是刻意边界。
+- 覆盖部署后仍不承诺能播。

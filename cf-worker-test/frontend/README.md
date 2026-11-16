@@ -13,10 +13,10 @@
 
 ## 本测试版策略
 
-1. **主修复**：`fetch-wrap.js` 在 SW 里包装 `fetch`，流 body → `arrayBuffer()`，空流则省略 body。不把 `duplex:'half'` 当充分方案。
-2. **诊断**：包装器在带 init 的 fetch 失败时返回 **502** + `--jsproxy-test-error`（不用 `--error`，以免触发 bundle 里 cfworker 重试循环），避免误导性 200 `load fail`。
+1. **主修复**：`fetch-wrap.js` 在 SW 里包装 `fetch`，流 body → `arrayBuffer()` 并 **写回同一 init**（`network.launch()` 最多重试 5 次，不能只改副本）。空流则省略 body。不把 duplex half 当充分方案。
+2. **诊断**：仅 duplex TypeError 返回 **502** + `--jsproxy-test-error`。AbortError / 普通 Failed to fetch **必须再抛**，否则播放器会把 502 文本当成 innertube JSON。
 3. **日志**：只打 `origin + pathname`，丢掉 query（签名/`n`/token）。
-4. **未改作者 bundle 字节**：由测试 origin 提供 `/assets/bundle.c33e24c5.js`（Worker 反代 etherdream.github.io），SW 脚本本身是新的。
+4. **未改作者 bundle 字节**：由测试 origin 提供 `/assets/bundle.c33e24c5.js`。
 
 若以后要重建 bundle，等价源码补丁见 `network.launch.js`。
 

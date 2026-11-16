@@ -73,10 +73,12 @@ function extractWrap(api) {
 async function nodeContractTests(api) {
   console.log('\n== Node contract ==')
   assert('tag', api.tag === 'jsproxy-yt-test', api.tag)
-  assert('ver', api.testVer === '120', api.testVer)
+  assert('ver', api.testVer === '121', api.testVer)
   assert('allow youtube', api.hostAllowed('www.youtube.com') === true)
   assert('allow googlevideo', api.hostAllowed('rr1---sn-abc.googlevideo.com') === true)
   assert('allow ytimg', api.hostAllowed('i.ytimg.com') === true)
+  assert('allow youtube-nocookie', api.hostAllowed('www.youtube-nocookie.com') === true)
+  assert('deny doubleclick ads host', api.hostAllowed('googleads.g.doubleclick.net') === false)
   assert('deny example.com', api.hostAllowed('example.com') === false)
   assert('deny evilgoogle.com', api.hostAllowed('evilgoogle.com') === false)
   assert('deny twitter', api.hostAllowed('twitter.com') === false)
@@ -93,7 +95,7 @@ async function nodeContractTests(api) {
     wrapLogic.includes('delete out.duplex') && !/duplex:\s*['"]half['"]/.test(wrapLogic)
   )
   assert('conf disables static_boost', api.swScript().includes("assets_cdn+'bundle.c33e24c5.js'") || workerSrc.includes('static_boost: { enable: false'))
-  assert('conf ver 120', workerSrc.includes("TEST_VER = '120'") && api.swScript().includes('jsproxy-yt-test sw 120'))
+  assert('conf ver 121', workerSrc.includes("TEST_VER = '121'") && api.swScript().includes('jsproxy-yt-test sw 121'))
   assert('frontend wrap exported', wrapSrc.includes('prepareOutgoingInit') && wrapSrc.includes('installJsproxyYtTestFetchWrap'))
   assert('sw embeds frontend wrap', api.swScript().includes('prepareOutgoingInit') && api.swScript().includes('installJsproxyYtTestFetchWrap(self)'))
   assert('no production host hardcoded as ASSET_URL default', !workerSrc.includes("ASSET_URL = 'https://etherdream.github.io/jsproxy'") || workerSrc.includes('UPSTREAM_STATIC'))
@@ -111,6 +113,7 @@ async function workerHttpTests(api) {
   const infoJson = await info.json()
   assert('info 200', info.status === 200)
   assert('info isolated', infoJson.isolatedTest === true && infoJson.playbackNotGuaranteed === true)
+  assert('info wrap reuse flags', infoJson.wrapInPlaceBody === true && infoJson.wrapAbortRethrow === true)
   assert('info boost off', infoJson.staticBoost === false)
   assert('info --jsproxy-test', info.headers.get('--jsproxy-test') === '1')
 
@@ -184,6 +187,7 @@ async function workerHttpTests(api) {
   const index = await handleViaWorker(api, new Request(origin + '/assets/index_v3.html'))
   const indexText = await index.text()
   assert('index is test page', /隔离测试/.test(indexText) && /jNQXAC9IVRw/.test(indexText))
+  assert('index has no SW-hijackable self-check href', !/href\s*=\s*["']\/__test__\//.test(indexText) && !/href\s*=\s*["']\/works/.test(indexText))
 }
 
 function startServer(api, port) {
@@ -448,7 +452,7 @@ async function wrapUnitTest() {
 
   const g = {
     fetch: async () => {
-      throw new TypeError("Failed to execute 'fetch' on 'WorkerGlobalScope': streaming body")
+      throw new TypeError("Failed to execute 'fetch' on 'WorkerGlobalScope': The 'duplex' member must be specified for a request with a streaming body")
     },
   }
   const logs = []
@@ -463,13 +467,74 @@ async function wrapUnitTest() {
       body: 'x',
     })
     const text = await res.text()
-    assert('wrap fail is 502 not 200', res.status === 502)
+    assert('wrap duplex TypeError is 502 not 200', res.status === 502)
     assert('wrap fail header', res.headers.get('--jsproxy-test-error') && /TypeError/.test(res.headers.get('--jsproxy-test-error')))
     assert('wrap fail body has no signed query', !/SECRET|n=NOPE/.test(text))
     assert('wrap fail log sanitized', logs.some((l) => /videoplayback/.test(l)) && !logs.some((l) => /SECRET/.test(l)))
   } finally {
     console.warn = origWarn
   }
+
+  const calls = []
+  const reuseGlobal = {
+    fetch: async (_input, initArg) => {
+      calls.push({
+        hasReferrer: !!(initArg && initArg.referrer),
+        referrer: initArg && initArg.referrer,
+        bodyType: initArg && initArg.body && initArg.body.constructor && initArg.body.constructor.name,
+        bytes: initArg && initArg.body && initArg.body.byteLength,
+      })
+      return new Response('ok')
+    },
+  }
+  installJsproxyYtTestFetchWrap(reuseGlobal)
+  const reuseInit = {
+    method: 'POST',
+    mode: 'cors',
+    referrer: '/?--ver=121&--mode=cors&origin=https://yt-test.example',
+    headers: new Headers({ accept: '*/*' }),
+    body: new ReadableStream({
+      start(c) {
+        c.enqueue(new Uint8Array([1, 2, 3, 4]))
+        c.close()
+      },
+    }),
+  }
+  await reuseGlobal.fetch('https://yt-test.example/http/https://www.youtube.com/youtubei/v1/player', reuseInit)
+  await reuseGlobal.fetch('https://yt-test.example/http/https://www.youtube.com/youtubei/v1/player', reuseInit)
+  assert('wrap mutates init body for reuse', reuseInit.body instanceof ArrayBuffer && reuseInit.body.byteLength === 4)
+  assert('wrap retry sees buffered body', calls.length === 2 && calls[0].bytes === 4 && calls[1].bytes === 4)
+  assert('wrap keeps referrer query map', /--ver=121/.test(reuseInit.referrer || '') && calls[1].hasReferrer === true)
+
+  const abortGlobal = {
+    fetch: async () => {
+      const err = new Error('The user aborted a request.')
+      err.name = 'AbortError'
+      throw err
+    },
+  }
+  installJsproxyYtTestFetchWrap(abortGlobal)
+  let abortThrew = false
+  try {
+    await abortGlobal.fetch('https://www.youtube.com/youtubei/v1/player', { method: 'POST', body: '{}' })
+  } catch (err) {
+    abortThrew = err && err.name === 'AbortError'
+  }
+  assert('wrap rethrows AbortError', abortThrew === true)
+
+  const netGlobal = {
+    fetch: async () => {
+      throw new TypeError('Failed to fetch')
+    },
+  }
+  installJsproxyYtTestFetchWrap(netGlobal)
+  let netThrew = false
+  try {
+    await netGlobal.fetch('https://www.youtube.com/youtubei/v1/player', { method: 'GET' })
+  } catch (err) {
+    netThrew = err && err.name === 'TypeError' && /Failed to fetch/.test(String(err.message))
+  }
+  assert('wrap rethrows non-duplex TypeError', netThrew === true)
 }
 
 function writeArtifact(api) {

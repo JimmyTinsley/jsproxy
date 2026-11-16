@@ -15,7 +15,7 @@
  */
 
 var TEST_TAG = 'jsproxy-yt-test'
-var TEST_VER = '120'
+var TEST_VER = '121'
 var JS_VER = 10
 var BUNDLE_NAME = 'bundle.c33e24c5.js'
 var UPSTREAM_STATIC = 'https://etherdream.github.io/jsproxy'
@@ -24,6 +24,7 @@ var UPSTREAM_STATIC = 'https://etherdream.github.io/jsproxy'
 var ALLOWED_HOST_SUFFIXES = [
   'youtube.com',
   'youtu.be',
+  'youtube-nocookie.com',
   'ytimg.com',
   'googlevideo.com',
   'ggpht.com',
@@ -107,7 +108,7 @@ function newUrl(urlStr) {
  * 缓冲流 body，失败返回 502 而不是抛给 bundle 变成 200 load fail。
  */
 /* <FETCH_WRAP_IIFE_BEGIN> */
-var FETCH_WRAP_IIFE = "// <JSPROXY_YT_TEST_FETCH_WRAP>\n(function(){\n/**\n * SW 侧 fetch 包装：在作者 bundle.c33e24c5.js 调用 fetch(proxyUrl, init)\n * 之前把 ReadableStream body 缓冲成 ArrayBuffer。\n *\n * 这是针对 Chrome 105+ 的构造期异常：\n *   TypeError: Failed to execute 'fetch' on 'WorkerGlobalScope':\n *   The 'duplex' member must be specified for a request with a streaming body\n *\n * 评估结论：只加 duplex half 能过构造检查，但对 /http/ 代理路径仍会\n * 因流式上传 CORS 预检失败。缓冲 body 后请求变为普通 POST，本地与\n * 用户 Worker 对照均已通过。本包装删除 duplex 字段，不以它为修复。\n *\n * 本文件既被测试引用，也被 worker.js 嵌入到 /sw.js（importScripts bundle 之前）。\n */\n\nfunction sanitizeUrl(u) {\n  try {\n    const x = new URL(typeof u === 'string' ? u : (u && u.url) || '')\n    return x.origin + x.pathname\n  } catch (err) {\n    return '[unparseable-url]'\n  }\n}\n\n/**\n * @param {RequestInit} init\n * @returns {Promise<RequestInit>}\n */\nasync function prepareOutgoingInit(init) {\n  const src = init || {}\n  const out = {}\n  const keys = Object.keys(src)\n  for (let i = 0; i < keys.length; i++) {\n    out[keys[i]] = src[keys[i]]\n  }\n  const body = out.body\n  if (body && typeof body.getReader === 'function') {\n    const buf = await new Response(body).arrayBuffer()\n    if (buf.byteLength > 0) {\n      out.body = buf\n    } else {\n      delete out.body\n    }\n    delete out.duplex\n  }\n  return out\n}\n\nfunction installJsproxyYtTestFetchWrap(global) {\n  const rawFetch = global.fetch.bind(global)\n\n  global.fetch = async function (input, init) {\n    try {\n      if (init !== undefined) {\n        const prepared = await prepareOutgoingInit(init)\n        return await rawFetch(input, prepared)\n      }\n      return await rawFetch(input)\n    } catch (err) {\n      if (init === undefined) {\n        throw err\n      }\n      const name = (err && err.name) || 'Error'\n      const message = String((err && err.message) || err).slice(0, 180)\n      const where = sanitizeUrl(typeof input === 'string' ? input : (input && input.url))\n      console.warn('[jsproxy-yt-test] fetch fail', name, message, where)\n      return new Response('jsproxy-yt-test fetch failed: ' + name + ':' + message, {\n        status: 502,\n        headers: {\n          'content-type': 'text/plain;charset=utf-8',\n          'access-control-expose-headers': '--jsproxy-test,--jsproxy-test-error,--s',\n          '--jsproxy-test': '1',\n          '--jsproxy-test-error': name + ':' + message,\n          '--s': '502',\n        },\n      })\n    }\n  }\n}\ninstallJsproxyYtTestFetchWrap(self);\n})();\n// </JSPROXY_YT_TEST_FETCH_WRAP>"
+var FETCH_WRAP_IIFE = "// <JSPROXY_YT_TEST_FETCH_WRAP>\n(function(){\n/**\n * SW 侧 fetch 包装：在作者 bundle.c33e24c5.js 调用 fetch(proxyUrl, init)\n * 之前把 ReadableStream body 缓冲成 ArrayBuffer，并写回同一个 init，\n * 以便 network.launch() 的重试循环能复用正文。\n *\n * 这是针对 Chrome 105+ 的构造期异常：\n *   TypeError: Failed to execute 'fetch' on 'WorkerGlobalScope':\n *   The 'duplex' member must be specified for a request with a streaming body\n *\n * 评估结论：只加 duplex half 能过构造检查，但对 /http/ 代理路径仍会\n * 因流式上传 CORS 预检失败。缓冲 body 后请求变为普通 POST。\n *\n * 不要把带 init 的任意 fetch 失败收成 502：AbortError / 普通网络错误若变成\n * “成功的 502 响应”，播放器会把非 JSON 当 innertube 结果，表现为无时长、无 src。\n * 仅 duplex TypeError 才返回 502，避免 bundle 合成误导性 200 load fail。\n */\n\nfunction sanitizeUrl(u) {\n  try {\n    const x = new URL(typeof u === 'string' ? u : (u && u.url) || '')\n    return x.origin + x.pathname\n  } catch (err) {\n    return '[unparseable-url]'\n  }\n}\n\nfunction isDuplexTypeError(err) {\n  const name = (err && err.name) || ''\n  const message = String((err && err.message) || err)\n  return name === 'TypeError' && /duplex/i.test(message)\n}\n\n/**\n * 原地改 init：流 body → ArrayBuffer（空流则删除 body）。\n * 必须写回同一对象，bundle 重试时仍用这个 init。\n * @param {RequestInit} init\n * @returns {Promise<RequestInit>}\n */\nasync function prepareOutgoingInit(init) {\n  const out = init || {}\n  const body = out.body\n  if (body && typeof body.getReader === 'function') {\n    const buf = await new Response(body).arrayBuffer()\n    if (buf.byteLength > 0) {\n      out.body = buf\n    } else {\n      delete out.body\n    }\n    delete out.duplex\n  }\n  return out\n}\n\nfunction installJsproxyYtTestFetchWrap(global) {\n  const rawFetch = global.fetch.bind(global)\n\n  global.fetch = async function (input, init) {\n    if (init !== undefined) {\n      await prepareOutgoingInit(init)\n    }\n    try {\n      if (init !== undefined) {\n        return await rawFetch(input, init)\n      }\n      return await rawFetch(input)\n    } catch (err) {\n      if (init === undefined || !isDuplexTypeError(err)) {\n        throw err\n      }\n      const name = (err && err.name) || 'Error'\n      const message = String((err && err.message) || err).slice(0, 180)\n      const where = sanitizeUrl(typeof input === 'string' ? input : (input && input.url))\n      console.warn('[jsproxy-yt-test] fetch fail', name, message, where)\n      return new Response('jsproxy-yt-test fetch failed: ' + name + ':' + message, {\n        status: 502,\n        headers: {\n          'content-type': 'text/plain;charset=utf-8',\n          'access-control-expose-headers': '--jsproxy-test,--jsproxy-test-error,--s',\n          '--jsproxy-test': '1',\n          '--jsproxy-test-error': name + ':' + message,\n          '--s': '502',\n        },\n      })\n    }\n  }\n}\ninstallJsproxyYtTestFetchWrap(self);\n})();\n// </JSPROXY_YT_TEST_FETCH_WRAP>"
 /* <FETCH_WRAP_IIFE_END> */
 
 function swScript() {
@@ -165,8 +166,11 @@ function indexHtml() {
     '<p>测试标签 <code>' + TEST_TAG + '</code> · conf.ver <code>' + TEST_VER + '</code> · bundle <code>' + BUNDLE_NAME + '</code>（作者未改字节，经本 origin 提供）</p>' +
     '<input id=txtURL value="https://www.youtube.com/watch?v=jNQXAC9IVRw">' +
     '<button id=btnGo>打开代理（新窗口）</button>' +
-    '<p>自检：<a href="/__test__/info">/__test__/info</a> · <a href="/works">/works</a></p>' +
+    '<p>SW 控制本页后，相对路径会被当成 Google 搜索。自检请用终端（不要在本页打开 /__test__/info）：</p>' +
+    '<p><code id=curlHint></code></p>' +
+    '<p>浏览器只读诊断：Network 里是否出现 <code>watch?v=</code> 的文档、<code>youtubei/v1/player</code> POST、以及随后的 <code>videoplayback</code>。Console 是否还有 duplex TypeError / JSON parse。Play 后看 video.src / duration。</p>' +
     '<script>' +
+    'curlHint.textContent="curl -sS https://"+location.host+"/__test__/info";' +
     'btnGo.onclick=function(){var t=txtURL.value.trim();if(!t)return;if(!/^https?:/i.test(t))t="https://"+t;open("./-----"+t,"_blank","noopener,noreferrer")};' +
     'txtURL.onkeypress=function(e){if(e.keyCode===13)btnGo.onclick()};' +
     '</script></body></html>'
@@ -275,6 +279,8 @@ async function handleTestInfo(req) {
     staticBoost: false,
     node: 'mysite=self',
     allowedHostSuffixes: ALLOWED_HOST_SUFFIXES,
+    wrapInPlaceBody: true,
+    wrapAbortRethrow: true,
     playbackNotGuaranteed: true,
   })
 }

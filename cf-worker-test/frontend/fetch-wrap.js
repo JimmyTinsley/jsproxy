@@ -1,16 +1,18 @@
 /**
  * SW 侧 fetch 包装：在作者 bundle.c33e24c5.js 调用 fetch(proxyUrl, init)
- * 之前把 ReadableStream body 缓冲成 ArrayBuffer。
+ * 之前把 ReadableStream body 缓冲成 ArrayBuffer，并写回同一个 init，
+ * 以便 network.launch() 的重试循环能复用正文。
  *
  * 这是针对 Chrome 105+ 的构造期异常：
  *   TypeError: Failed to execute 'fetch' on 'WorkerGlobalScope':
  *   The 'duplex' member must be specified for a request with a streaming body
  *
  * 评估结论：只加 duplex half 能过构造检查，但对 /http/ 代理路径仍会
- * 因流式上传 CORS 预检失败。缓冲 body 后请求变为普通 POST，本地与
- * 用户 Worker 对照均已通过。本包装删除 duplex 字段，不以它为修复。
+ * 因流式上传 CORS 预检失败。缓冲 body 后请求变为普通 POST。
  *
- * 本文件既被测试引用，也被 worker.js 嵌入到 /sw.js（importScripts bundle 之前）。
+ * 不要把带 init 的任意 fetch 失败收成 502：AbortError / 普通网络错误若变成
+ * “成功的 502 响应”，播放器会把非 JSON 当 innertube 结果，表现为无时长、无 src。
+ * 仅 duplex TypeError 才返回 502，避免 bundle 合成误导性 200 load fail。
  */
 
 export function sanitizeUrl(u) {
@@ -22,17 +24,20 @@ export function sanitizeUrl(u) {
   }
 }
 
+function isDuplexTypeError(err) {
+  const name = (err && err.name) || ''
+  const message = String((err && err.message) || err)
+  return name === 'TypeError' && /duplex/i.test(message)
+}
+
 /**
+ * 原地改 init：流 body → ArrayBuffer（空流则删除 body）。
+ * 必须写回同一对象，bundle 重试时仍用这个 init。
  * @param {RequestInit} init
  * @returns {Promise<RequestInit>}
  */
 export async function prepareOutgoingInit(init) {
-  const src = init || {}
-  const out = {}
-  const keys = Object.keys(src)
-  for (let i = 0; i < keys.length; i++) {
-    out[keys[i]] = src[keys[i]]
-  }
+  const out = init || {}
   const body = out.body
   if (body && typeof body.getReader === 'function') {
     const buf = await new Response(body).arrayBuffer()
@@ -50,14 +55,16 @@ export function installJsproxyYtTestFetchWrap(global) {
   const rawFetch = global.fetch.bind(global)
 
   global.fetch = async function (input, init) {
+    if (init !== undefined) {
+      await prepareOutgoingInit(init)
+    }
     try {
       if (init !== undefined) {
-        const prepared = await prepareOutgoingInit(init)
-        return await rawFetch(input, prepared)
+        return await rawFetch(input, init)
       }
       return await rawFetch(input)
     } catch (err) {
-      if (init === undefined) {
+      if (init === undefined || !isDuplexTypeError(err)) {
         throw err
       }
       const name = (err && err.name) || 'Error'
