@@ -18,7 +18,7 @@
 3. **日志**：只打 `origin + pathname`，丢掉 query（签名/`n`/token）。
 4. **jsfilter**：作者 `jsfilter.parseStr` 用 `/postMessage\s*\(/` 改所有 script。对 `function postMessage(` / 方法简写会变成非法形参，V8 报 `SyntaxError: Unexpected token '('`。测试 Worker 在提供 `bundle.c33e24c5.js` 时把该正则收窄为 `/\.postMessage\s*\(/`（只改成员调用）。源码见 `jsfilter.js`。
 5. 未拿到用户截图里那份截断名 `kevlar_base_module…sync_mod_chunk` 的原始字节，因此不能声称已核对 5756:156；能核对的是同一改写规则的最小 case 与作者 bundle 中的唯一改写点。
-6. **v123**：`attachReqMapHeader` 把 bundle 的 `referrer: '/?'+URLSearchParams` 复制到 `x-jsproxy-reqmap`，避开 Chrome 4KB Referer 上限。Worker 用 `1-set-cookie` 对齐 lua。契约见 `get-res-info.js`、`proxy-headers.js`。不伪造 UA/指纹，不放开 CSP。
+6. **v124** 不改本文件。白名单取消在 `worker.js` 的目的地检查里；不要把 v123 的 `x-jsproxy-reqmap` 嵌进 v124 Worker。
 
 若以后要重建 bundle，等价源码补丁见 `network.launch.js`。
 

@@ -36,32 +36,6 @@ function isDuplexTypeError(err) {
  * @param {RequestInit} init
  * @returns {Promise<RequestInit>}
  */
-export const REQMAP_HEADER = 'x-jsproxy-reqmap'
-
-export function packedQueryFromReferrer(referrer) {
-  if (typeof referrer !== 'string') return ''
-  const qPos = referrer.indexOf('?')
-  if (qPos < 0) return ''
-  return referrer.slice(qPos + 1)
-}
-
-/**
- * 作者 bundle 把 cookie/origin 塞进 fetch referrer query。
- * Chrome ≥77 会把超过 4096 字节的 Referer 收成 origin，query 丢失。
- * 同 origin Worker 请求可另带 x-jsproxy-reqmap，不改 Origin 语义、不合成指纹。
- */
-export function attachReqMapHeader(init) {
-  const out = init || {}
-  const packed = packedQueryFromReferrer(out.referrer)
-  if (!packed) return out
-  const headers = new Headers(out.headers || undefined)
-  if (!headers.has(REQMAP_HEADER)) {
-    headers.set(REQMAP_HEADER, packed)
-  }
-  out.headers = headers
-  return out
-}
-
 export async function prepareOutgoingInit(init) {
   const out = init || {}
   const body = out.body
@@ -74,7 +48,6 @@ export async function prepareOutgoingInit(init) {
     }
     delete out.duplex
   }
-  attachReqMapHeader(out)
   return out
 }
 

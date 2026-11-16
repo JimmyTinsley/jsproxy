@@ -5,7 +5,7 @@
  *
  *   node cf-worker-test/build.mjs
  */
-import { copyFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -51,9 +51,4 @@ if (next === workerSrc) {
 }
 
 writeFileSync(workerPath, next)
-try {
-  copyFileSync(workerPath, join(root, 'offline-harness', 'worker.js'))
-} catch (err) {
-  process.stderr.write('note: could not copy worker.js to offline-harness: ' + err + '\n')
-}
 process.stdout.write('embedded fetch-wrap.js -> worker.js FETCH_WRAP_IIFE (' + iife.length + ' chars)\n')

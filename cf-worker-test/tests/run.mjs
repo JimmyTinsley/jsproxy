@@ -4,8 +4,8 @@
  * 不请求 YouTube 签名媒体 URL，不使用私有 API。
  */
 import { createServer } from 'node:http'
-import { readFileSync, mkdirSync, writeFileSync, copyFileSync } from 'node:fs'
-import { spawn, spawnSync } from 'node:child_process'
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import vm from 'node:vm'
@@ -29,59 +29,6 @@ function assert(name, cond, detail) {
   else fail(name, detail || 'assertion failed')
 }
 
-function isAllowedYoutubeGoogleHost(host) {
-  const suffixes = [
-    'youtube.com',
-    'youtu.be',
-    'youtube-nocookie.com',
-    'ytimg.com',
-    'googlevideo.com',
-    'ggpht.com',
-    'googleusercontent.com',
-    'gstatic.com',
-    'googleapis.com',
-    'google.com',
-    'wide-youtube.l.google.com',
-  ]
-  host = String(host || '').toLowerCase()
-  return suffixes.some((d) => host === d || host.endsWith('.' + d))
-}
-
-function mockUpstream(urlObj, init) {
-  const headersIn = new Headers((init && init.headers) || undefined)
-  const echo = {
-    synthetic: true,
-    href: urlObj.href,
-    host: urlObj.host,
-    pathname: urlObj.pathname,
-    search: urlObj.search,
-    continue: urlObj.searchParams.get('continue'),
-    origin: headersIn.get('origin'),
-    cookie: headersIn.get('cookie'),
-    ua: headersIn.get('user-agent'),
-    referer: headersIn.get('referer'),
-    xJsproxy: headersIn.get('x-jsproxy'),
-    secFetchSite: headersIn.get('sec-fetch-site'),
-    reqmap: headersIn.get('x-jsproxy-reqmap'),
-  }
-  const headers = new Headers({ 'content-type': 'application/json; charset=utf-8' })
-  headers.append(
-    'set-cookie',
-    'SID=syn.sid; Domain=.google.com; Path=/; Secure; HttpOnly; Expires=Wed, 21 Oct 2030 07:28:00 GMT'
-  )
-  headers.append('set-cookie', 'HSID=syn.hsid; Domain=.google.com; Path=/; Secure; HttpOnly')
-  headers.append('set-cookie', '__Host-GAPS=syn.gaps; Path=/; Secure; HttpOnly')
-  if (urlObj.pathname === '/redirect') {
-    headers.set(
-      'location',
-      'https://accounts.google.com/ServiceLogin?continue=' +
-        encodeURIComponent('https://www.youtube.com/watch?v=jNQXAC9IVRw')
-    )
-    return new Response(JSON.stringify(echo), { status: 302, headers })
-  }
-  return new Response(JSON.stringify(echo), { status: 200, headers })
-}
-
 function loadWorker() {
   const listeners = []
   const sandbox = {
@@ -101,17 +48,7 @@ function loadWorker() {
     Date,
     Error,
     TypeError,
-    fetch: function (input, init) {
-      const url = typeof input === 'string' ? input : input && input.url
-      const u = new URL(url)
-      if (u.hostname === 'etherdream.github.io') {
-        return globalThis.fetch(input, init)
-      }
-      if (isAllowedYoutubeGoogleHost(u.hostname)) {
-        return Promise.resolve(mockUpstream(u, init))
-      }
-      return globalThis.fetch(input, init)
-    },
+    fetch: globalThis.fetch.bind(globalThis),
     addEventListener(type, fn) {
       if (type === 'fetch') listeners.push(fn)
     },
@@ -136,15 +73,19 @@ function extractWrap(api) {
 async function nodeContractTests(api) {
   console.log('\n== Node contract ==')
   assert('tag', api.tag === 'jsproxy-yt-test', api.tag)
-  assert('ver', api.testVer === '123', api.testVer)
-  assert('allow youtube', api.hostAllowed('www.youtube.com') === true)
-  assert('allow googlevideo', api.hostAllowed('rr1---sn-abc.googlevideo.com') === true)
-  assert('allow ytimg', api.hostAllowed('i.ytimg.com') === true)
-  assert('allow youtube-nocookie', api.hostAllowed('www.youtube-nocookie.com') === true)
-  assert('deny doubleclick ads host', api.hostAllowed('googleads.g.doubleclick.net') === false)
-  assert('deny example.com', api.hostAllowed('example.com') === false)
-  assert('deny evilgoogle.com', api.hostAllowed('evilgoogle.com') === false)
-  assert('deny twitter', api.hostAllowed('twitter.com') === false)
+  assert('ver', api.testVer === '124', api.testVer)
+  assert('allow example.com', api.hostAllowed('example.com') === true)
+  assert('allow www.example.com', api.hostAllowed('www.example.com') === true)
+  assert('allow twitter.com as public host', api.hostAllowed('twitter.com') === true)
+  assert('deny localhost', api.hostAllowed('localhost') === false)
+  assert('deny 127.0.0.1', api.hostAllowed('127.0.0.1') === false)
+  assert('deny 10.0.0.1', api.hostAllowed('10.0.0.1') === false)
+  assert('deny 192.168.1.1', api.hostAllowed('192.168.1.1') === false)
+  assert('deny 172.16.0.1', api.hostAllowed('172.16.0.1') === false)
+  assert('deny 169.254.169.254 metadata', api.hostAllowed('169.254.169.254') === false)
+  assert('deny metadata.google.internal', api.hostAllowed('metadata.google.internal') === false)
+  assert('deny ::1', api.hostAllowed('::1') === false)
+  assert('v123 cookie/reqmap not bundled', !workerSrc.includes('x-jsproxy-reqmap') && !workerSrc.includes('1-set-cookie'))
   assert(
     'sanitize drops query',
     api.sanitizeUrl('https://rr.googlevideo.com/videoplayback?id=1&signature=SECRET&n=NOPE') ===
@@ -158,9 +99,9 @@ async function nodeContractTests(api) {
     wrapLogic.includes('delete out.duplex') && !/duplex:\s*['"]half['"]/.test(wrapLogic)
   )
   assert('conf disables static_boost', api.swScript().includes("assets_cdn+'bundle.c33e24c5.js'") || workerSrc.includes('static_boost: { enable: false'))
-  assert('conf ver 123', workerSrc.includes("TEST_VER = '123'") && api.swScript().includes('jsproxy-yt-test sw 123'))
-  assert('sw cache-busts patched bundle', api.swScript().includes('bundle.c33e24c5.js?jsproxy-yt-test=123'))
-  assert('worker numbered cookies + reqmap', workerSrc.includes("'-set-cookie'") && workerSrc.includes('x-jsproxy-reqmap'))
+  assert('conf ver 124', workerSrc.includes("TEST_VER = '124'") && api.swScript().includes('jsproxy-yt-test sw 124'))
+  assert('sw cache-busts patched bundle', api.swScript().includes('bundle.c33e24c5.js?jsproxy-yt-test=124'))
+  assert('no youtube allowlist array', !workerSrc.includes("ALLOWED_HOST_SUFFIXES") && workerSrc.includes('youtubeAllowlist: false'))
   assert('frontend wrap exported', wrapSrc.includes('prepareOutgoingInit') && wrapSrc.includes('installJsproxyYtTestFetchWrap'))
   assert('sw embeds frontend wrap', api.swScript().includes('prepareOutgoingInit') && api.swScript().includes('installJsproxyYtTestFetchWrap(self)'))
   assert('no production host hardcoded as ASSET_URL default', !workerSrc.includes("ASSET_URL = 'https://etherdream.github.io/jsproxy'") || workerSrc.includes('UPSTREAM_STATIC'))
@@ -178,10 +119,10 @@ async function workerHttpTests(api) {
   const infoJson = await info.json()
   assert('info 200', info.status === 200)
   assert('info isolated', infoJson.isolatedTest === true && infoJson.playbackNotGuaranteed === true)
+  assert('info not youtube dedicated', infoJson.youtubeAllowlist === false && infoJson.youtubeDedicated === false && infoJson.publicHttpsProxy === true)
+  assert('info private blocked flag', infoJson.privateDestinationBlocked === true)
   assert('info wrap reuse flags', infoJson.wrapInPlaceBody === true && infoJson.wrapAbortRethrow === true)
   assert('info jsfilter patch flag', infoJson.jsfilterPatch === 'postMessage-call-only')
-  assert('info v123 flags', infoJson.multiCookieNumbered === true && infoJson.reqmapHeader === 'x-jsproxy-reqmap')
-  assert('info bot-gate independent', infoJson.botGateIndependent === true)
   assert('info boost off', infoJson.staticBoost === false)
   assert('info --jsproxy-test', info.headers.get('--jsproxy-test') === '1')
 
@@ -200,7 +141,7 @@ async function workerHttpTests(api) {
 
   const opt = await handleViaWorker(
     api,
-    new Request(origin + '/http/https://www.youtube.com/watch?v=jNQXAC9IVRw', { method: 'OPTIONS' })
+    new Request(origin + '/http/https://example.com/', { method: 'OPTIONS' })
   )
   assert('preflight 204 even without ACRH', opt.status === 204)
   assert('preflight ACAO', opt.headers.get('access-control-allow-origin') === '*')
@@ -208,19 +149,35 @@ async function workerHttpTests(api) {
 
   const opt2 = await handleViaWorker(
     api,
-    new Request(origin + '/http/https://www.youtube.com/', {
+    new Request(origin + '/http/https://example.com/', {
       method: 'OPTIONS',
       headers: { 'access-control-request-headers': 'x-foo', 'access-control-request-method': 'POST' },
     })
   )
   assert('preflight with ACRH still 204', opt2.status === 204)
 
-  const denied = await handleViaWorker(api, new Request(origin + '/http/https://example.com/'))
-  const deniedText = await denied.text()
-  assert('deny example 403', denied.status === 403)
-  assert('deny not fake 200 html', denied.headers.get('content-type') !== 'text/html; charset=utf-8')
-  assert('deny --error', denied.headers.get('--error') === 'host-denied')
-  assert('deny body mentions host', /example.com/.test(deniedText))
+  const publicSite = await handleViaWorker(api, new Request(origin + '/http/https://example.com/'))
+  const publicText = await publicSite.text()
+  assert('example.com proxied not 403', publicSite.status !== 403, String(publicSite.status))
+  assert('example.com not host-denied', publicSite.headers.get('--error') !== 'host-denied')
+  assert('example.com has body', publicText.length > 0)
+
+  async function denyHost(url, hostPart) {
+    const denied = await handleViaWorker(api, new Request(origin + '/http/' + url))
+    const deniedText = await denied.text()
+    assert('deny ' + hostPart + ' 403', denied.status === 403, String(denied.status))
+    assert('deny ' + hostPart + ' --error', denied.headers.get('--error') === 'host-denied')
+    assert('deny ' + hostPart + ' body', deniedText.indexOf(hostPart) >= 0)
+    return denied
+  }
+  await denyHost('https://127.0.0.1/', '127.0.0.1')
+  await denyHost('http://localhost/', 'localhost')
+  await denyHost('http://192.168.1.1/', '192.168.1.1')
+  await denyHost('http://10.1.2.3/', '10.1.2.3')
+  await denyHost('http://169.254.169.254/latest/meta-data/', '169.254.169.254')
+  await denyHost('http://metadata.google.internal/', 'metadata.google.internal')
+  const ftp = await handleViaWorker(api, new Request(origin + '/http/ftp://example.com/'))
+  assert('deny ftp protocol', ftp.status === 403 && ftp.headers.get('--error') === 'protocol')
 
   const sinkGet = await handleViaWorker(api, new Request(origin + '/__test__/sink', { method: 'POST', body: 'abc' }))
   const sinkJson = await sinkGet.json()
@@ -254,142 +211,9 @@ async function workerHttpTests(api) {
 
   const index = await handleViaWorker(api, new Request(origin + '/assets/index_v3.html'))
   const indexText = await index.text()
-  assert('index is test page', /隔离测试/.test(indexText) && /jNQXAC9IVRw/.test(indexText))
+  assert('index is test page', /隔离测试/.test(indexText) && /example.com/.test(indexText) && !/jNQXAC9IVRw/.test(indexText))
+  assert('index not youtube-dedicated copy', /不再是 YouTube 专用白名单/.test(indexText))
   assert('index has no SW-hijackable self-check href', !/href\s*=\s*["']\/__test__\//.test(indexText) && !/href\s*=\s*["']\/works/.test(indexText))
-
-  const compat = await handleViaWorker(api, new Request(origin + '/__test__/compat'))
-  const compatJson = await compat.json()
-  assert('compat 200 pass', compat.status === 200 && compatJson.pass === true, JSON.stringify(compatJson))
-}
-
-async function proxyCompatTests(api) {
-  console.log('\n== proxy cookie/header/continue (synthetic) ==')
-  const origin = 'https://yt-test.example'
-  const { getResInfo } = await import('../frontend/get-res-info.js')
-  const {
-    encodeEscapedResHeaders,
-    encodeSetCookieV122Collapsed,
-    restoreOriginRequestHeaders,
-    attachReqMapHeader,
-    rebuildProxyTarget,
-    continueHostFromUrl,
-    REQMAP_HEADER,
-  } = await import('../frontend/proxy-headers.js')
-
-  const originRes = new Headers()
-  originRes.append(
-    'set-cookie',
-    'SID=syn.sid; Domain=.google.com; Path=/; Secure; HttpOnly; Expires=Wed, 21 Oct 2030 07:28:00 GMT'
-  )
-  originRes.append('set-cookie', 'HSID=syn.hsid; Domain=.google.com; Path=/; Secure; HttpOnly')
-  originRes.append('set-cookie', '__Host-GAPS=syn.gaps; Path=/; Secure; HttpOnly')
-  const collapsed = encodeSetCookieV122Collapsed(originRes)
-  const numbered = encodeEscapedResHeaders(originRes, false)
-  const parsed122 = getResInfo(new Response('', { headers: collapsed }))
-  const parsed123 = getResInfo(new Response('', { headers: numbered.resHdrNew }))
-  const parsed123Api = api.getResInfo(new Response('', { headers: numbered.resHdrNew }))
-  assert('v122 collapses to <3 cookies', parsed122.cookieStrArr.length < 3, String(parsed122.cookieStrArr.length))
-  assert('v123 keeps 3 cookies', parsed123.cookieStrArr.length === 3, JSON.stringify(parsed123.cookieStrArr))
-  assert('v123 worker getResInfo matches frontend', parsed123Api.cookieStrArr.length === 3)
-  assert(
-    'v123 keeps Expires comma',
-    parsed123.cookieStrArr.some((s) => /Expires=Wed, 21 Oct 2030/.test(s))
-  )
-  assert(
-    'v123 keeps __Host-GAPS',
-    parsed123.cookieStrArr.some((s) => s.startsWith('__Host-GAPS='))
-  )
-
-  const entriesEmpty = Object.entries(new URLSearchParams('cookie=a=1&origin=https://www.youtube.com'))
-  const fe = []
-  new URLSearchParams('cookie=a=1&origin=https://www.youtube.com').forEach((_v, k) => fe.push(k))
-  assert('Object.entries(URLSearchParams) empty (prod cf-worker quirk)', entriesEmpty.length === 0)
-  assert('forEach restores keys', fe.includes('cookie') && fe.includes('origin'))
-
-  const longCookie = 'SYN=' + 'x'.repeat(4500)
-  const packed = new URLSearchParams({
-    origin: 'https://www.youtube.com',
-    cookie: longCookie,
-    referer: 'https://www.youtube.com/',
-  }).toString()
-  const incoming = new Headers({
-    'user-agent': 'Mozilla/5.0 jsproxy-yt-test-synthetic',
-    origin: 'https://yt-test.example',
-    cookie: 'workerSite=1',
-    'sec-fetch-site': 'same-origin',
-    'cf-connecting-ip': '203.0.113.1',
-    referer: 'https://yt-test.example/',
-  })
-  incoming.set(REQMAP_HEADER, packed)
-  const restored = restoreOriginRequestHeaders(incoming)
-  assert('origin from map not proxy', restored.reqHdrNew.get('origin') === 'https://www.youtube.com')
-  assert('long cookie restored via reqmap', (restored.reqHdrNew.get('cookie') || '').length > 4000)
-  assert('UA passthrough not synthesized Chrome', restored.reqHdrNew.get('user-agent') === 'Mozilla/5.0 jsproxy-yt-test-synthetic')
-  assert('worker site cookie not leaked', !/workerSite=/.test(restored.reqHdrNew.get('cookie') || ''))
-  assert('sec-fetch-site hop stripped', restored.reqHdrNew.get('sec-fetch-site') === null)
-  assert('cf-connecting-ip stripped', restored.reqHdrNew.get('cf-connecting-ip') === null)
-
-  const truncatedIncoming = new Headers({
-    origin: 'https://yt-test.example',
-    referer: 'https://yt-test.example/',
-    'user-agent': 'Mozilla/5.0 jsproxy-yt-test-synthetic',
-  })
-  const truncated = restoreOriginRequestHeaders(truncatedIncoming)
-  assert(
-    'truncated Referer does not invent Google origin',
-    truncated.reqHdrNew.get('origin') !== 'https://accounts.google.com' &&
-      truncated.reqHdrNew.get('origin') !== 'https://yt-test.example'
-  )
-
-  const encodedContinue =
-    'https://accounts.google.com/ServiceLogin?continue=' +
-    encodeURIComponent('https://www.youtube.com/watch?v=jNQXAC9IVRw')
-  const rebuilt = rebuildProxyTarget(encodedContinue)
-  const cont = continueHostFromUrl(rebuilt.href)
-  assert('continue host stays youtube.com', cont.host === 'www.youtube.com', JSON.stringify(cont))
-  const proxyContinue =
-    'https://accounts.google.com/ServiceLogin?continue=' +
-    encodeURIComponent('https://yt-test.example/-----https://www.youtube.com/')
-  const rebuiltProxy = continueHostFromUrl(rebuildProxyTarget(proxyContinue).href)
-  assert(
-    'rewritten continue host is proxy (detected, not rewritten away)',
-    rebuiltProxy.host === 'yt-test.example',
-    JSON.stringify(rebuiltProxy)
-  )
-  assert(
-    'worker does not rewrite continue to invent youtube',
-    api.rebuildProxyTarget(proxyContinue).searchParams.get('continue').includes('yt-test.example')
-  )
-
-  const init = {
-    method: 'GET',
-    referrer: '/?' + packed,
-    headers: new Headers({ accept: '*/*' }),
-  }
-  attachReqMapHeader(init)
-  assert(
-    'wrap copies packed map to header',
-    init.headers.get(REQMAP_HEADER) === packed
-  )
-
-  const proxyReq = new Request(origin + '/http/' + encodedContinue, {
-    headers: {
-      'user-agent': 'Mozilla/5.0 jsproxy-yt-test-synthetic',
-      origin: 'https://yt-test.example',
-      'sec-fetch-site': 'same-origin',
-      [REQMAP_HEADER]: packed,
-    },
-  })
-  const proxied = await handleViaWorker(api, proxyReq)
-  assert('proxied synthetic login 200', proxied.status === 200, String(proxied.status))
-  const info = api.getResInfo(proxied)
-  assert('proxied numbered cookies via getResInfo', info.cookieStrArr.length === 3, JSON.stringify(info.cookieStrArr))
-  const echo = JSON.parse(await proxied.text())
-  assert('mock origin saw youtube origin from map', echo.origin === 'https://www.youtube.com', JSON.stringify(echo))
-  assert('mock origin saw long cookie', typeof echo.cookie === 'string' && echo.cookie.length > 4000)
-  assert('mock origin did not see sec-fetch-site', echo.secFetchSite == null)
-  assert('mock origin continue host youtube', echo.continue && echo.continue.includes('www.youtube.com'))
-  assert('mock origin saw passthrough UA', echo.ua === 'Mozilla/5.0 jsproxy-yt-test-synthetic')
 }
 
 function startServer(api, port) {
@@ -473,32 +297,9 @@ function startServer(api, port) {
     await fetch('/__test__/range', { cache: 'no-store' })
     await fetch('/__test__/range', { headers: { Range: 'bytes=10-17' }, cache: 'no-store' })
     await fetch('/http/https://example.com/')
-    await fetch('/http/https://www.youtube.com/', { method: 'OPTIONS' })
+    await fetch('/http/https://example.com/', { method: 'OPTIONS' })
+    await fetch('/http/https://127.0.0.1/')
     await fetch('/__test__/status?code=404')
-    await fetch('/__test__/compat', { cache: 'no-store' })
-    var packed = new URLSearchParams({
-      origin: 'https://www.youtube.com',
-      cookie: 'SYN=' + 'x'.repeat(4500),
-      referer: 'https://www.youtube.com/'
-    }).toString()
-    await fetch('/__test__/sink?k=referer-long', {
-      method: 'POST',
-      body: 'ref',
-      cache: 'no-store',
-      referrer: '/?' + packed
-    })
-    await fetch('/__test__/sink?k=referer-long-reqmap', {
-      method: 'POST',
-      body: 'refmap',
-      cache: 'no-store',
-      referrer: '/?' + packed,
-      headers: { 'x-jsproxy-reqmap': packed }
-    })
-    await fetch('/http/https://accounts.google.com/ServiceLogin?continue=' + encodeURIComponent('https://www.youtube.com/watch?v=jNQXAC9IVRw'), {
-      cache: 'no-store',
-      referrer: '/?' + packed,
-      headers: { 'x-jsproxy-reqmap': packed, 'user-agent': 'Mozilla/5.0 jsproxy-yt-test-synthetic' }
-    })
   } catch (err) {
     try { await fetch('/__test__/sink?k=page-throw', { method: 'POST', body: String(err && err.message || err) }) } catch (e) {}
   }
@@ -565,8 +366,6 @@ function startServer(api, port) {
           ctype: response.headers.get('content-type') || '',
           contentRange: response.headers.get('content-range') || '',
           contentLength: response.headers.get('content-length') || '',
-          refererLen: String(req.headers.referer || req.headers.referrer || '').length,
-          reqmapLen: String(req.headers['x-jsproxy-reqmap'] || '').length,
         })
         const outHdrs = {}
         response.headers.forEach((v, k) => {
@@ -632,13 +431,10 @@ async function chromeTests(port, started) {
         ev.some((e) => e.k === 'sw-copybody') &&
         ev.some((e) => e.pathname === '/__test__/range' && e.status === 200) &&
         ev.some((e) => e.pathname === '/__test__/range' && e.status === 206) &&
-        ev.some((e) => e.pathname.startsWith('/http/') && e.status === 403) &&
+        ev.some((e) => e.pathname.indexOf('/http/https://example.com') === 0 && e.status !== 403 && e.method !== 'OPTIONS') &&
+        ev.some((e) => e.pathname.indexOf('127.0.0.1') >= 0 && e.status === 403) &&
         ev.some((e) => e.method === 'OPTIONS' && e.status === 204) &&
-        ev.some((e) => e.pathname === '/__test__/status' && e.status === 404) &&
-        ev.some((e) => e.pathname === '/__test__/compat' && e.status === 200) &&
-        ev.some((e) => e.pathname.startsWith('/http/') && e.status === 200) &&
-        ev.some((e) => e.k === 'referer-long') &&
-        ev.some((e) => e.k === 'referer-long-reqmap'),
+        ev.some((e) => e.pathname === '/__test__/status' && e.status === 404),
       20000
     )
   } catch (err) {
@@ -656,7 +452,8 @@ async function chromeTests(port, started) {
   const swCopy = findEvent(ev, (e) => e.k === 'sw-copybody')
   const range200 = findEvent(ev, (e) => e.pathname === '/__test__/range' && e.status === 200)
   const range206 = findEvent(ev, (e) => e.pathname === '/__test__/range' && e.status === 206)
-  const denied = findEvent(ev, (e) => e.pathname.startsWith('/http/') && e.status === 403)
+  const denied = findEvent(ev, (e) => e.pathname.indexOf('127.0.0.1') >= 0 && e.status === 403)
+  const publicHit = findEvent(ev, (e) => e.pathname.indexOf('/http/https://example.com') === 0 && e.method !== 'OPTIONS')
   const pre = findEvent(ev, (e) => e.method === 'OPTIONS' && e.status === 204)
   const e404 = findEvent(ev, (e) => e.pathname === '/__test__/status' && e.status === 404)
 
@@ -667,25 +464,10 @@ async function chromeTests(port, started) {
   assert('sw copybody reconstruct no TypeError', swCopy && swCopy.status === 200 && swCopy.bytes === 4, JSON.stringify(swCopy))
   assert('GET range 200', range200 && range200.status === 200, JSON.stringify(range200))
   assert('GET range 206', range206 && range206.status === 206 && range206.contentRange === 'bytes 10-17/256', JSON.stringify(range206))
-  assert('denied 403', denied && denied.error === 'host-denied', JSON.stringify(denied))
+  assert('denied localhost/loopback 403', denied && denied.error === 'host-denied', JSON.stringify(denied))
+  assert('chrome example.com not host-denied', publicHit && publicHit.status !== 403, JSON.stringify(publicHit))
   assert('preflight 204', !!pre, JSON.stringify(pre))
   assert('error 404 not html 200', e404 && e404.status === 404 && !/text\/html/.test(e404.ctype || ''), JSON.stringify(e404))
-  const compatEv = findEvent(ev, (e) => e.pathname === '/__test__/compat' && e.status === 200)
-  const loginEv = findEvent(ev, (e) => e.pathname.startsWith('/http/') && e.status === 200)
-  assert('chrome /__test__/compat 200', !!compatEv, JSON.stringify(compatEv))
-  assert('chrome synthetic ServiceLogin 200 via mock', !!loginEv, JSON.stringify(loginEv))
-  const refLong = findEvent(ev, (e) => e.k === 'referer-long')
-  const refMap = findEvent(ev, (e) => e.k === 'referer-long-reqmap')
-  assert(
-    'chrome truncates long Referer below packed length',
-    refLong && refLong.refererLen < 4096,
-    JSON.stringify(refLong)
-  )
-  assert(
-    'chrome still delivers x-jsproxy-reqmap >4k',
-    refMap && refMap.reqmapLen > 4000,
-    JSON.stringify(refMap)
-  )
   const synUp = findEvent(ev, (e) => e.k === 'syntax-up')
   const synFx = findEvent(ev, (e) => e.k === 'syntax-fx')
   assert(
@@ -698,8 +480,7 @@ async function chromeTests(port, started) {
 
 async function wrapUnitTest() {
   console.log('\n== fetch-wrap unit (Node) ==')
-  const { prepareOutgoingInit, installJsproxyYtTestFetchWrap, attachReqMapHeader, REQMAP_HEADER } =
-    await import('../frontend/fetch-wrap.js')
+  const { prepareOutgoingInit, installJsproxyYtTestFetchWrap } = await import('../frontend/fetch-wrap.js')
   const empty = new ReadableStream({
     start(c) {
       c.close()
@@ -719,15 +500,6 @@ async function wrapUnitTest() {
   assert('nonempty drops duplex', !('duplex' in b) || b.duplex === undefined)
   const c = await prepareOutgoingInit({ method: 'GET' })
   assert('GET unchanged no body', c.body === undefined && c.method === 'GET')
-  const mapped = {
-    method: 'GET',
-    referrer: '/?cookie=SID%3Dsyn&origin=https%3A%2F%2Fwww.youtube.com',
-    headers: new Headers({ accept: '*/*' }),
-  }
-  await prepareOutgoingInit(mapped)
-  assert('prepareOutgoingInit attaches reqmap', mapped.headers.get(REQMAP_HEADER) && /cookie=/.test(mapped.headers.get(REQMAP_HEADER)))
-  attachReqMapHeader(mapped)
-  assert('attachReqMapHeader is idempotent', (mapped.headers.get(REQMAP_HEADER).match(/cookie=/g) || []).length === 1)
 
   const g = {
     fetch: async () => {
@@ -920,21 +692,19 @@ function writeArtifact(api) {
   writeFileSync(join(outDir, 'worker.meta.json'), JSON.stringify(meta, null, 2) + '\n')
   const readme = readFileSync(join(root, 'README.md'), 'utf8')
   writeFileSync(join(outDir, 'DEPLOY.md'), readme)
-  const harnessDir = join(root, 'offline-harness')
-  copyFileSync(join(root, 'worker.js'), join(harnessDir, 'worker.js'))
-  copyFileSync(join(root, 'worker.js'), join(outDir, 'worker.js'))
-  const zipPath = join(outDir, 'jsproxy-yt-test-v123-offline.zip')
-  const zip = spawnSync(
-    'zip',
-    ['-j', zipPath, join(harnessDir, 'server.mjs'), join(harnessDir, 'README.txt'), join(harnessDir, 'worker.js')],
-    { encoding: 'utf8' }
-  )
-  if (zip.status !== 0) {
-    console.warn('zip failed', zip.stderr || zip.stdout)
+  const v123 = join(root, 'archive-v123', 'worker.v123.js')
+  try {
+    const v123Src = readFileSync(v123)
+    writeFileSync(join(outDir, 'worker-v123.js'), v123Src)
+    const v123sha = createHash('sha256').update(v123Src).digest('hex')
+    writeFileSync(join(outDir, 'worker-v123.sha256'), v123sha + '  worker-v123.js\n')
+    meta.v123sha256 = v123sha
+    console.log('  kept v123 artifact', v123sha)
+  } catch (err) {
+    console.warn('  no v123 archive', err && err.message)
   }
   console.log('\n== artifacts ==')
   console.log('  wrote', dest, sha, meta.bytes, 'bytes')
-  if (zip.status === 0) console.log('  wrote', zipPath)
   return meta
 }
 
@@ -945,7 +715,6 @@ await nodeContractTests(apiBundle.api)
 await wrapUnitTest()
 await jsfilterParseTest(apiBundle.api)
 await workerHttpTests(apiBundle.api)
-await proxyCompatTests(apiBundle.api)
 const started = await startServer(apiBundle.api, PORT)
 try {
   await chromeTests(PORT, started)

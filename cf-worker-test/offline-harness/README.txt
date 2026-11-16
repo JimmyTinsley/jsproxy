@@ -1,11 +1,12 @@
-jsproxy YouTube 隔离测试 Worker · 离线浏览器回归（v123）
+jsproxy 隔离测试 Worker · 离线浏览器回归（v123 Cookie 实验，不是 v124）
 =====================================================
 
 这不是生产 https://js.jimmytinsley.com。不承诺 YouTube 能播。
 修多 Set-Cookie / Referer 头还原 ≠ 过人机门。不要对真实 ServiceLogin 401 URL 重试。
 
-在本文件夹运行（需要 Node 18+，不要 clone 仓库）：
+v124 可部署 Worker 是上级目录 `../worker.js`（无 Cookie/reqmap）。本 harness 仍针对 v123。
 
+  cp ../archive-v123/worker.v123.js ./worker.js
   node server.mjs
 
 然后用 Chrome 打开终端打印的地址（默认 http://127.0.0.1:8793/）。
